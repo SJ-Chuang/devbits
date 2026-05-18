@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devbits"
+version = "0.1.0"
+description = "A lightweight CLI toolkit for daily development utilities."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Bruce Chuang" }
+]
+keywords = ["cli", "developer-tools", "video", "image", "cache", "utilities"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "opencv-python>=4.8",
+  "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/devbits"
+Repository = "https://github.com/yourname/devbits"
+Issues = "https://github.com/yourname/devbits/issues"
+
+[project.scripts]
+devbits = "devbits.cli:main"
+clearcache = "devbits.scripts:clearcache"
+images2video = "devbits.scripts:images2video"
+video2images = "devbits.scripts:video2images"
+images2gif = "devbits.scripts:images2gif"
+video2gif = "devbits.scripts:video2gif"
+clipvideo = "devbits.scripts:clipvideo"
+resizevideo = "devbits.scripts:resizevideo"
+image2ico = "devbits.scripts:image2ico"
+resizeimage = "devbits.scripts:resizeimage"
+batchimages = "devbits.scripts:batchimages"
+checkimages = "devbits.scripts:checkimages"
+contactsheet = "devbits.scripts:contactsheet"
+tree = "devbits.scripts:tree"
+size = "devbits.scripts:size"
+renamefiles = "devbits.scripts:renamefiles"
+samplefiles = "devbits.scripts:samplefiles"
+
+[tool.setuptools.packages.find]
+include = ["devbits*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
