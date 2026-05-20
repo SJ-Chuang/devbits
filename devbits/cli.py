@@ -157,7 +157,9 @@ def cmd_video2gif(args: argparse.Namespace) -> None:
 
 def cmd_clipvideo(args: argparse.Namespace) -> None:
     if args.gui:
-        print("Warning: --gui is reserved for a future interactive clip selector; using CLI options now.")
+        from .gui import launch_gui
+        launch_gui(args.video)
+        return
     print(clip_video(ensure_exists(args.video), args.output, args.start, args.end, args.start_frame, args.end_frame))
 
 
