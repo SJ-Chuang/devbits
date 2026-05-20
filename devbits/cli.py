@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_video2gif)
 
     p = sub.add_parser("clipvideo", help="Clip video by seconds or frame indices.")
-    p.add_argument("video", type=Path)
+    p.add_argument("video", type=Path, nargs="?", default=None)
     p.add_argument("-o", "--output", type=Path, default=Path("clip.mp4"))
     p.add_argument("--start", type=float)
     p.add_argument("--end", type=float)
@@ -160,6 +160,8 @@ def cmd_clipvideo(args: argparse.Namespace) -> None:
         from .gui import launch_gui
         launch_gui(args.video)
         return
+    if args.video is None:
+        raise ValueError("video path is required when --gui is not specified")
     print(clip_video(ensure_exists(args.video), args.output, args.start, args.end, args.start_frame, args.end_frame))
 
 
