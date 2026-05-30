@@ -14,6 +14,7 @@ import tempfile
 import threading
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -29,7 +30,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClipVideo Editor — devbits</title>
+<title>Divbits.ClipVideo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -69,6 +70,7 @@ body{
   transition:all .15s ease;display:inline-flex;align-items:center;gap:6px;
 }
 .btn:active{transform:scale(.96)}
+.btn:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}
 .btn-ghost{background:rgba(255,255,255,.06);color:#c0c0da}
 .btn-ghost:hover{background:rgba(255,255,255,.12)}
 .btn-primary{
@@ -116,10 +118,12 @@ body{
   display:flex;align-items:center;gap:10px;
   background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);
   border-radius:8px;padding:8px;transition:all 0.2s ease;
+  cursor:grab;
 }
 .media-item:hover{
   background:rgba(255,255,255,0.05);border-color:rgba(124,92,252,0.3);
 }
+.media-item.dragging-media{opacity:.4}
 .media-thumb{
   width:50px;height:36px;background:rgba(0,0,0,0.3);
   border-radius:4px;display:flex;align-items:center;justify-content:center;
@@ -251,10 +255,32 @@ body{
   background:linear-gradient(180deg,#2a2a55 0%,#1e1e45 100%);
   border:2px solid transparent;
   border-radius:8px;
-  cursor:pointer;
-  transition:border-color .15s,box-shadow .15s;
+  cursor:grab;
+  transition:border-color .15s,box-shadow .15s,opacity .15s;
   display:flex;align-items:center;justify-content:center;
   overflow:hidden;
+}
+.clip-block.dragging{opacity:.3;cursor:grabbing}
+.clip-block.drag-over-left{border-left:3px solid #7c5cfc}
+.clip-block.drag-over-right{border-right:3px solid #7c5cfc}
+
+/* Floating ghost while dragging a clip */
+.clip-drag-ghost{
+  position:fixed;pointer-events:none;z-index:9999;
+  border-radius:8px;border:2px solid #7c5cfc;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 8px 32px rgba(124,92,252,.5);
+  opacity:.85;transform:scale(1.04);
+  font-size:.75rem;font-weight:600;color:rgba(255,255,255,.9);
+  padding:0 12px;white-space:nowrap;
+}
+
+/* Timeline drop indicator for media library drag */
+.timeline-drop-indicator{
+  position:absolute;top:0;bottom:0;width:3px;
+  background:#7c5cfc;z-index:20;border-radius:2px;
+  pointer-events:none;
+  box-shadow:0 0 8px rgba(124,92,252,.6);
 }
 .clip-block:hover{border-color:rgba(124,92,252,.4)}
 .clip-block.selected{
@@ -374,8 +400,7 @@ kbd{
 <!-- Top Bar -->
 <header class="topbar">
   <div style="display:flex;align-items:center">
-    <span class="logo">✂ ClipVideo</span>
-    <span class="filename" id="filename">No clips in timeline</span>
+    <span class="logo">✂ Divbits.ClipVideo</span>
   </div>
   <div class="topbar-actions">
     <button class="btn btn-primary" onclick="showExportModal()">⬇ Export</button>
@@ -409,9 +434,11 @@ kbd{
 
     <!-- Playback Controls -->
     <div class="controls-bar">
+      <button class="step-btn" onclick="seekTimeline(0)" title="Jump to start">⏮⏮</button>
       <button class="step-btn" onclick="stepFrame(-1)" title="Previous frame">⏮</button>
       <button class="play-btn" id="playBtn" onclick="togglePlay()" title="Play/Pause (Space)">▶</button>
       <button class="step-btn" onclick="stepFrame(1)" title="Next frame">⏭</button>
+      <button class="step-btn" onclick="seekTimeline(getTotalDuration())" title="Jump to end">⏭⏭</button>
       <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
 
       <div class="speed-group">
@@ -434,8 +461,7 @@ kbd{
       <div class="timeline-toolbar">
         <button class="btn btn-ghost" onclick="splitAtPlayhead()" title="Split (S)">✂ Split<kbd>S</kbd></button>
         <button class="btn btn-danger" onclick="deleteSelected()" title="Delete (Del)">🗑 Delete<kbd>Del</kbd></button>
-        <button class="btn btn-ghost" onclick="moveClip(-1)" title="Move left">← Move</button>
-        <button class="btn btn-ghost" onclick="moveClip(1)" title="Move right">Move →</button>
+
         <div style="flex:1"></div>
         <span style="font-size:.75rem;color:#777799" id="clipInfo"></span>
       </div>
@@ -461,6 +487,15 @@ kbd{
       <option value="webm">WebM (.webm)</option>
       <option value="gif">GIF (.gif)</option>
     </select>
+    <label>Resolution</label>
+    <select id="exportResolution">
+      <option value="3840">4K (3840×2160)</option>
+      <option value="2560">1440p (2560×1440)</option>
+      <option value="1920" selected>1080p (1920×1080)</option>
+      <option value="1280">720p (1280×720)</option>
+      <option value="854">480p (854×480)</option>
+      <option value="0">Original</option>
+    </select>
     <label>Filename</label>
     <input type="text" id="exportFilename" value="output">
     <div class="progress-wrap" id="progressWrap">
@@ -483,16 +518,18 @@ kbd{
 // ── State ──────────────────────────────────────────────────────
 const video = document.getElementById('video');
 let mediaLibrary = []; // {id, src, name, duration}
-let clips = []; // {id, src, name, startTime, endTime, speed, duration}
+let clips = []; // {id, src, name, startTime, endTime, speed, duration, hue}
 let selectedClipId = null;
 let activeClipIndex = 0;
 let timelineTime = 0;
 let clipIdCounter = 0;
+let hueCounter = 0; // stable color assignment
 let isChangingSource = false;
 let isScrubbing = false;
 let wasPlayingBeforeScrub = false;
 
 const PX_PER_SEC = 80;
+const CLIP_GAP = 3; // px gap between clips
 
 // ── Duration Helper ────────────────────────────────────────────
 function getMediaDuration(src) {
@@ -511,7 +548,23 @@ function getMediaDuration(src) {
 
 // ── Media Library Operations ──────────────────────────────────
 function addMediaToLibrary(src, name, duration, autoAddToTimeline = false) {
-  if (mediaLibrary.some(item => item.src === src)) {
+  // Normalize src for dedup (resolve to absolute URL)
+  const a = document.createElement('a');
+  a.href = src;
+  const normalizedSrc = a.href;
+  if (mediaLibrary.some(item => {
+    const b = document.createElement('a');
+    b.href = item.src;
+    return b.href === normalizedSrc;
+  })) {
+    if (autoAddToTimeline) {
+      const existing = mediaLibrary.find(item => {
+        const b = document.createElement('a');
+        b.href = item.src;
+        return b.href === normalizedSrc;
+      });
+      if (existing) addMediaToTimeline(existing);
+    }
     return;
   }
   const item = {
@@ -545,6 +598,7 @@ function renderMediaLibrary() {
   mediaLibrary.forEach(item => {
     const card = document.createElement('div');
     card.className = 'media-item';
+    card.draggable = false; // we use custom mousedown drag
 
     const thumb = document.createElement('div');
     thumb.className = 'media-thumb';
@@ -553,16 +607,16 @@ function renderMediaLibrary() {
     const info = document.createElement('div');
     info.className = 'media-info';
 
-    const name = document.createElement('div');
-    name.className = 'media-name';
-    name.textContent = item.name;
-    name.title = item.name;
+    const nameEl = document.createElement('div');
+    nameEl.className = 'media-name';
+    nameEl.textContent = item.name;
+    nameEl.title = item.name;
 
     const duration = document.createElement('div');
     duration.className = 'media-duration';
     duration.textContent = fmtTime(item.duration);
 
-    info.appendChild(name);
+    info.appendChild(nameEl);
     info.appendChild(duration);
 
     const addBtn = document.createElement('button');
@@ -574,6 +628,12 @@ function renderMediaLibrary() {
       addMediaToTimeline(item);
     };
 
+    // Drag from media library to timeline
+    card.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.media-add-btn')) return;
+      startMediaLibraryDrag(e, item, card);
+    });
+
     card.appendChild(thumb);
     card.appendChild(info);
     card.appendChild(addBtn);
@@ -582,7 +642,7 @@ function renderMediaLibrary() {
   });
 }
 
-function addMediaToTimeline(media) {
+function addMediaToTimeline(media, insertAtIndex = -1) {
   const newClip = {
     id: ++clipIdCounter,
     src: media.src,
@@ -590,17 +650,21 @@ function addMediaToTimeline(media) {
     startTime: 0,
     endTime: media.duration,
     speed: 1,
-    duration: media.duration
+    duration: media.duration,
+    hue: (hueCounter++ * 37 + 230) % 360
   };
-  clips.push(newClip);
+  if (insertAtIndex >= 0 && insertAtIndex <= clips.length) {
+    clips.splice(insertAtIndex, 0, newClip);
+  } else {
+    clips.push(newClip);
+  }
   selectedClipId = newClip.id;
 
   if (clips.length === 1) {
     activeClipIndex = 0;
     seekTimeline(0);
-  } else {
-    renderTimeline();
   }
+  renderTimeline();
   toast(`Added to timeline`);
 }
 
@@ -705,7 +769,6 @@ function setSpeed(val) {
 function updateTimeDisplay() {
   if (clips.length === 0) {
     document.getElementById('timeDisplay').textContent = '0:00.000 / 0:00.000';
-    document.getElementById('filename').textContent = 'No clips in timeline';
     document.getElementById('noVideo').style.display = 'block';
     video.style.display = 'none';
     updatePlayhead();
@@ -875,11 +938,14 @@ function setupTimelineInteraction() {
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
     if (e.target.closest('.trim-handle') || e.target.closest('.btn-danger')) return;
-
-    const clipEl = e.target.closest('.clip-block');
-    if (clipEl) {
+    // Don't start scrubbing if a drag is starting on a clip block
+    if (e.target.closest('.clip-block') && !e.target.closest('.trim-handle')) {
+      const clipEl = e.target.closest('.clip-block');
       const clipId = parseInt(clipEl.dataset.clipId);
       selectClip(clipId);
+      // Start potential drag
+      startClipDrag(e, clipEl, clipId);
+      return;
     }
 
     isScrubbing = true;
@@ -912,6 +978,196 @@ function setupTimelineInteraction() {
   wrapper.addEventListener('mousedown', onMouseDown);
 }
 
+// ── Clip Drag & Drop Reorder ──────────────────────────────────
+function createDragGhost(text, hue, width, height) {
+  const ghost = document.createElement('div');
+  ghost.className = 'clip-drag-ghost';
+  ghost.textContent = text;
+  ghost.style.width = Math.min(width, 200) + 'px';
+  ghost.style.height = height + 'px';
+  ghost.style.background = `linear-gradient(180deg, hsl(${hue},45%,32%) 0%, hsl(${hue},40%,22%) 100%)`;
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
+function startClipDrag(e, clipEl, clipId) {
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  let ghost = null;
+  const DRAG_THRESHOLD = 5;
+  const srcIdx = clips.findIndex(c => c.id === clipId);
+  if (srcIdx === -1) return;
+  const clip = clips[srcIdx];
+
+  const onMove = (ev) => {
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+    if (!dragging && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
+      dragging = true;
+      clipEl.classList.add('dragging');
+      const rect = clipEl.getBoundingClientRect();
+      ghost = createDragGhost(clip.name, clip.hue, rect.width, rect.height);
+    }
+    if (!dragging) return;
+
+    // Move ghost
+    ghost.style.left = (ev.clientX - 60) + 'px';
+    ghost.style.top = (ev.clientY - 20) + 'px';
+
+    // Find which clip we're hovering over
+    const allClips = document.querySelectorAll('.clip-block');
+    allClips.forEach(el => {
+      el.classList.remove('drag-over-left', 'drag-over-right');
+    });
+    for (const el of allClips) {
+      if (el === clipEl) continue;
+      const rect = el.getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (ev.clientX >= rect.left && ev.clientX <= rect.right) {
+        if (ev.clientX < mid) {
+          el.classList.add('drag-over-left');
+        } else {
+          el.classList.add('drag-over-right');
+        }
+      }
+    }
+  };
+
+  const onUp = (ev) => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    clipEl.classList.remove('dragging');
+    if (ghost) { ghost.remove(); ghost = null; }
+
+    if (!dragging) {
+      // Was just a click, not a drag — seek to clip
+      isScrubbing = true;
+      wasPlayingBeforeScrub = !video.paused;
+      if (wasPlayingBeforeScrub) video.pause();
+      handleTimelineClick(ev);
+      isScrubbing = false;
+      if (wasPlayingBeforeScrub) {
+        video.play().catch(e => console.log("Play interrupted:", e));
+      }
+      return;
+    }
+
+    // Find drop target
+    const allClips = document.querySelectorAll('.clip-block');
+    let targetIdx = -1;
+    let insertAfter = false;
+    for (const el of allClips) {
+      el.classList.remove('drag-over-left', 'drag-over-right');
+      if (el === clipEl) continue;
+      const rect = el.getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (ev.clientX >= rect.left && ev.clientX <= rect.right) {
+        const tId = parseInt(el.dataset.clipId);
+        targetIdx = clips.findIndex(c => c.id === tId);
+        insertAfter = ev.clientX >= mid;
+        break;
+      }
+    }
+
+    if (targetIdx !== -1 && targetIdx !== srcIdx) {
+      const [removed] = clips.splice(srcIdx, 1);
+      let insertIdx = targetIdx;
+      if (srcIdx < targetIdx) insertIdx--;
+      if (insertAfter) insertIdx++;
+      clips.splice(insertIdx, 0, removed);
+      selectedClipId = removed.id;
+      activeClipIndex = clips.findIndex(c => c.id === removed.id);
+      renderTimeline();
+      seekTimeline(getTimelineStartOfClip(activeClipIndex));
+      toast('Clip moved');
+    } else {
+      renderTimeline();
+    }
+  };
+
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// ── Media Library Drag to Timeline ────────────────────────────
+function startMediaLibraryDrag(e, media, card) {
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  let ghost = null;
+  let dropIndicator = null;
+  const DRAG_THRESHOLD = 5;
+
+  const onMove = (ev) => {
+    const dx = ev.clientX - startX;
+    const dy = ev.clientY - startY;
+    if (!dragging && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
+      dragging = true;
+      card.classList.add('dragging-media');
+      ghost = createDragGhost(media.name, (hueCounter * 37 + 230) % 360, 160, 40);
+    }
+    if (!dragging) return;
+
+    ghost.style.left = (ev.clientX - 60) + 'px';
+    ghost.style.top = (ev.clientY - 20) + 'px';
+
+    // Show drop position on timeline
+    const track = document.getElementById('track');
+    const trackRect = track.getBoundingClientRect();
+    if (ev.clientY >= trackRect.top - 40 && ev.clientY <= trackRect.bottom + 40) {
+      if (!dropIndicator) {
+        dropIndicator = document.createElement('div');
+        dropIndicator.className = 'timeline-drop-indicator';
+        document.getElementById('timelineContent').appendChild(dropIndicator);
+      }
+      const insertIdx = getInsertIndexAtX(ev.clientX);
+      const pos = getTimelineStartOfClip(insertIdx) * PX_PER_SEC;
+      dropIndicator.style.left = pos + 'px';
+    } else if (dropIndicator) {
+      dropIndicator.remove();
+      dropIndicator = null;
+    }
+  };
+
+  const onUp = (ev) => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    card.classList.remove('dragging-media');
+    if (ghost) { ghost.remove(); ghost = null; }
+    if (dropIndicator) { dropIndicator.remove(); dropIndicator = null; }
+
+    if (!dragging) return; // was just a click
+
+    // Check if dropped on timeline area
+    const track = document.getElementById('track');
+    const trackRect = track.getBoundingClientRect();
+    if (ev.clientY >= trackRect.top - 40 && ev.clientY <= trackRect.bottom + 40) {
+      const insertIdx = getInsertIndexAtX(ev.clientX);
+      addMediaToTimeline(media, insertIdx);
+    }
+  };
+
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+function getInsertIndexAtX(clientX) {
+  const content = document.getElementById('timelineContent');
+  const rect = content.getBoundingClientRect();
+  const x = Math.max(0, clientX - rect.left);
+  const t = x / PX_PER_SEC;
+
+  let acc = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const clipDur = (clips[i].endTime - clips[i].startTime) / clips[i].speed;
+    const mid = acc + clipDur / 2;
+    if (t < mid) return i;
+    acc += clipDur;
+  }
+  return clips.length;
+}
+
 document.addEventListener('DOMContentLoaded', setupTimelineInteraction);
 
 // ── Timeline Rendering ─────────────────────────────────────────
@@ -928,10 +1184,12 @@ function renderTimeline() {
   content.style.width = trackWidth + 'px';
   track.style.width = totalWidth + 'px';
 
+  const totalGap = clips.length > 1 ? (clips.length - 1) * CLIP_GAP : 0;
+
   let accTime = 0;
   clips.forEach((clip, i) => {
     const clipDur = (clip.endTime - clip.startTime) / clip.speed;
-    const left = accTime * PX_PER_SEC;
+    const left = accTime * PX_PER_SEC + i * CLIP_GAP;
     const w = clipDur * PX_PER_SEC;
 
     const el = document.createElement('div');
@@ -940,7 +1198,8 @@ function renderTimeline() {
     el.style.width = w + 'px';
     el.dataset.clipId = clip.id;
 
-    const hue = (i * 37 + 230) % 360;
+    // Use stable per-clip hue instead of index-based
+    const hue = clip.hue !== undefined ? clip.hue : (i * 37 + 230) % 360;
     el.style.background = `linear-gradient(180deg, hsl(${hue},45%,32%) 0%, hsl(${hue},40%,22%) 100%)`;
 
     const label = document.createElement('div');
@@ -962,20 +1221,14 @@ function renderTimeline() {
     accTime += clipDur;
   });
 
+  // Account for gaps in total track width
+  track.style.width = (totalDuration * PX_PER_SEC + totalGap) + 'px';
+
   renderRuler();
   updateClipInfo();
-  updateFilenameDisplay();
 }
 
-function updateFilenameDisplay() {
-  const fileEl = document.getElementById('filename');
-  if (clips.length === 0) {
-    fileEl.textContent = 'No clips in timeline';
-  } else {
-    const names = [...new Set(clips.map(c => c.name))];
-    fileEl.textContent = names.join(' + ');
-  }
-}
+
 
 function updateClipInfo() {
   const el = document.getElementById('clipInfo');
@@ -1070,7 +1323,8 @@ function splitAtPlayhead() {
     startTime: clip.startTime,
     endTime: t,
     speed: clip.speed,
-    duration: clip.duration
+    duration: clip.duration,
+    hue: clip.hue
   };
 
   const newClip2 = {
@@ -1080,7 +1334,8 @@ function splitAtPlayhead() {
     startTime: t,
     endTime: clip.endTime,
     speed: clip.speed,
-    duration: clip.duration
+    duration: clip.duration,
+    hue: (hueCounter++ * 37 + 230) % 360
   };
 
   clips.splice(activeClipIndex, 1, newClip1, newClip2);
@@ -1114,19 +1369,7 @@ function deleteSelected() {
   toast('Clip deleted');
 }
 
-function moveClip(dir) {
-  const idx = clips.findIndex(c => c.id === selectedClipId);
-  if (idx === -1) return;
-  const newIdx = idx + dir;
-  if (newIdx < 0 || newIdx >= clips.length) return;
 
-  [clips[idx], clips[newIdx]] = [clips[newIdx], clips[idx]];
-  selectedClipId = clips[newIdx].id;
-  activeClipIndex = newIdx;
-
-  renderTimeline();
-  seekTimeline(getTimelineStartOfClip(newIdx));
-}
 
 // ── Export ──────────────────────────────────────────────────────
 function showExportModal() {
@@ -1138,17 +1381,34 @@ function hideExportModal() {
   document.getElementById('progressWrap').classList.remove('show');
 }
 
+let exportPollTimer = null;
+
 async function doExport() {
   const fmt = document.getElementById('exportFormat').value;
   const filename = document.getElementById('exportFilename').value || 'output';
   const btn = document.getElementById('exportBtn');
+  const cancelBtn = document.querySelector('#exportModal .btn-ghost');
   const pw = document.getElementById('progressWrap');
   const pb = document.getElementById('progressBar');
 
   btn.disabled = true;
   btn.textContent = 'Exporting...';
+  cancelBtn.style.display = 'none';
   pw.classList.add('show');
-  pb.style.width = '30%';
+  pb.style.width = '0%';
+
+  // Poll progress
+  exportPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/export/progress');
+      const d = await r.json();
+      if (d.progress !== undefined) {
+        pb.style.width = Math.min(99, d.progress) + '%';
+      }
+    } catch(_) {}
+  }, 300);
+
+  const resolution = parseInt(document.getElementById('exportResolution').value);
 
   try {
     const resp = await fetch('/api/export', {
@@ -1162,10 +1422,11 @@ async function doExport() {
           speed: c.speed
         })),
         format: fmt,
-        filename: filename
+        filename: filename,
+        resolution: resolution
       })
     });
-    pb.style.width = '80%';
+    clearInterval(exportPollTimer);
     const data = await resp.json();
     pb.style.width = '100%';
 
@@ -1176,10 +1437,13 @@ async function doExport() {
       toast('Export error: ' + data.error, true);
     }
   } catch(e) {
+    clearInterval(exportPollTimer);
     toast('Export failed: ' + e.message, true);
   } finally {
+    clearInterval(exportPollTimer);
     btn.disabled = false;
     btn.textContent = 'Export';
+    cancelBtn.style.display = '';
   }
 }
 
@@ -1220,6 +1484,10 @@ function toast(msg, isError) {
 # HTTP Server
 # ---------------------------------------------------------------------------
 
+# Shared mutable export progress (written by export thread, read by poll handler)
+_export_progress = {"progress": 0}
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Request handler for the clip editor."""
 
@@ -1237,6 +1505,8 @@ class _Handler(BaseHTTPRequestHandler):
 
             if path == "/" or path == "":
                 self._serve_html()
+            elif path == "/api/export/progress":
+                self._json_response(_export_progress)
             elif path.startswith("/video/"):
                 self._serve_file(path[7:])
             elif path.startswith("/uploads/"):
@@ -1244,7 +1514,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._serve_static(fpath)
             else:
                 self.send_error(404)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
 
     # ── POST ───────────────────────────────────────────────────
@@ -1258,7 +1528,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_export()
             else:
                 self.send_error(404)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
 
     # ── Serve HTML (inject initial video) ──────────────────────
@@ -1398,13 +1668,14 @@ class _Handler(BaseHTTPRequestHandler):
         clip_defs = params.get("clips", [])
         fmt = params.get("format", "mp4")
         filename = params.get("filename", "output")
+        resolution = params.get("resolution", 0)
 
         if not clip_defs:
             self._json_response({"error": "No clips"}, 400)
             return
 
         try:
-            out_path = self._do_export(clip_defs, fmt, filename)
+            out_path = self._do_export(clip_defs, fmt, filename, resolution)
             self._json_response({"success": True, "path": str(out_path)})
         except Exception as exc:
             self._json_response({"error": str(exc)}, 500)
@@ -1421,8 +1692,11 @@ class _Handler(BaseHTTPRequestHandler):
             name = src.split("/")[-1]
             return Path(self.upload_dir) / name
 
-    def _do_export(self, clip_defs: list[dict], fmt: str, filename: str) -> Path:
+    def _do_export(self, clip_defs: list[dict], fmt: str, filename: str, resolution: int = 0) -> Path:
         """Run the actual export using cv2."""
+        global _export_progress
+        _export_progress["progress"] = 0
+
         if not clip_defs:
             raise ValueError("No clips to export")
 
@@ -1432,9 +1706,40 @@ class _Handler(BaseHTTPRequestHandler):
             raise RuntimeError(f"Cannot open video: {first_clip_src}")
 
         fps = first_cap.get(cv2.CAP_PROP_FPS) or 30.0
-        w = int(first_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(first_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        orig_w = int(first_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(first_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         first_cap.release()
+
+        # Apply resolution scaling
+        if resolution > 0 and orig_w > 0:
+            scale = resolution / orig_w
+            w = resolution
+            h = int(orig_h * scale)
+            # Ensure even dimensions for video codecs
+            h = h + (h % 2)
+        else:
+            w = orig_w
+            h = orig_h
+
+        # Pre-calculate total frames for progress tracking
+        total_frames = 0
+        for clip in clip_defs:
+            clip_src = self._resolve_clip_src(clip["src"])
+            cap = cv2.VideoCapture(str(clip_src))
+            if cap.isOpened():
+                clip_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                start_f = int(clip["startTime"] * clip_fps)
+                end_f = int(clip["endTime"] * clip_fps)
+                speed = clip.get("speed", 1.0)
+                if fmt == "gif":
+                    sample_every = max(1, int(round(speed)))
+                    total_frames += (end_f - start_f + 1) // sample_every
+                else:
+                    step = max(1.0, speed)
+                    total_frames += int((end_f - start_f) / step) + 1
+                cap.release()
+        total_frames = max(1, total_frames)
+        processed_frames = 0
 
         ext = fmt if fmt != "gif" else "gif"
         out_path = Path(self.export_dir) / f"{filename}.{ext}"
@@ -1464,12 +1769,16 @@ class _Handler(BaseHTTPRequestHandler):
                             frame = cv2.resize(frame, (w, h))
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         frames_for_gif.append(Image.fromarray(frame_rgb))
+                        processed_frames += 1
+                        # GIF: frame extraction is ~70% of the work, saving is ~30%
+                        _export_progress["progress"] = int(processed_frames / total_frames * 70)
                     fi += 1
                 cap.release()
 
             if not frames_for_gif:
                 raise ValueError("No frames extracted for GIF")
 
+            _export_progress["progress"] = 75
             gif_fps = fps / max(1, int(round(clip_defs[0].get("speed", 1.0))))
             out_path.parent.mkdir(parents=True, exist_ok=True)
             frames_for_gif[0].save(
@@ -1513,11 +1822,14 @@ class _Handler(BaseHTTPRequestHandler):
                         if frame.shape[1] != w or frame.shape[0] != h:
                             frame = cv2.resize(frame, (w, h))
                         writer.write(frame)
+                        processed_frames += 1
+                        _export_progress["progress"] = int(processed_frames / total_frames * 95)
                         fi += step
                     cap.release()
             finally:
                 writer.release()
 
+        _export_progress["progress"] = 100
         return out_path
 
     # ── Helpers ────────────────────────────────────────────────
@@ -1528,6 +1840,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in separate threads so progress polling works during export."""
+    daemon_threads = True
 
 
 def _find_free_port() -> int:
@@ -1550,7 +1867,7 @@ def launch_gui(video_path: Path | None = None) -> None:
     _Handler.upload_dir = upload_dir
     _Handler.export_dir = export_dir
 
-    server = HTTPServer(("127.0.0.1", port), _Handler)
+    server = _ThreadedHTTPServer(("127.0.0.1", port), _Handler)
     url = f"http://127.0.0.1:{port}"
 
     print(f"ClipVideo Editor running at {url}")
