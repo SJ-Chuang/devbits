@@ -1,158 +1,99 @@
 # devbits
 
-## CLI style
+A lightweight CLI toolkit for daily development utilities — video/image processing, project file management, and more.
 
-`devbits` provides both a main command and standalone commands installed into your Python environment's PATH.
-
-Main command style:
+## Installation
 
 ```bash
-devbits clearcache .
-devbits images2video frames/ -o output.mp4 --fps 30
+pip install devbits
 ```
 
-Standalone command style:
+Requires Python ≥ 3.9.
+
+## Usage
+
+All commands are available in two ways:
 
 ```bash
-clearcache .
-images2video frames/ -o output.mp4 --fps 30
-video2gif input.mp4 -o output.gif
-clipvideo input.mp4 --start 3 --end 10 -o clip.mp4
-```
-
-After editable install, reopen the terminal or run `hash -r` if your shell does not immediately find the new commands.
-
-
-`devbits` is a lightweight CLI toolkit for daily development utilities, including cache cleanup, media conversion, image helpers, dataset-like file operations, and project maintenance tools.
-
-The project supports two CLI styles:
-
-```bash
+# As subcommands of devbits
 devbits <command> [options]
+
+# As standalone commands
 <command> [options]
 ```
 
-## Features
-
-### Project cleanup
+Use `--help` on any command for detailed usage and parameter descriptions:
 
 ```bash
-devbits clearcache .
-devbits clearcache . --all
-devbits clearcache . --dry-run
-```
-
-Removes:
-
-- `__pycache__/`
-- `*.pyc`
-- `*.pyo`
-- optionally `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`
-
-### Image and video conversion
-
-```bash
-devbits images2video ./frames -o output.mp4 --fps 30
-devbits video2images input.mp4 -o ./frames --every 1
-devbits images2gif ./frames -o output.gif --fps 10
-devbits video2gif input.mp4 -o output.gif --fps 10 --start 2 --end 8
-devbits clipvideo input.mp4 -o clip.mp4 --start 3 --end 10
-devbits clipvideo input.mp4 -o clip.mp4 --start-frame 100 --end-frame 500
-devbits resizevideo input.mp4 -o resized.mp4 --size 1280,720
-```
-
-### Image utilities
-
-```bash
-devbits image2ico logo.png -o logo.ico
-devbits resizeimage input.jpg -o output.jpg --size 640,480
-devbits batchimages ./images -o ./resized --size 640,480 --format jpg
-devbits checkimages ./images --recursive
-devbits contactsheet ./images -o sheet.jpg --cols 5 --labels
-```
-
-### Project utilities
-
-```bash
-devbits tree . --depth 3
-devbits size . --top 20
-devbits renamefiles ./images --prefix frame --digits 6
-devbits renamefiles ./images --prefix frame --digits 6 --dry-run
-devbits samplefiles ./images -o ./sample --num 100
-```
-
-## Installation for local development
-
-```bash
-git clone https://github.com/yourname/devbits.git
-cd devbits
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-Check the CLI:
-
-```bash
-devbits --help
-devbits images2video --help
-clearcache --help
-images2video --help
-```
-
-## Build package
-
-```bash
-python -m pip install --upgrade build twine
-python -m build
-python -m twine check dist/*
-```
-
-## Upload to TestPyPI
-
-```bash
-python -m twine upload --repository testpypi dist/*
-```
-
-## Upload to PyPI
-
-```bash
-python -m twine upload dist/*
+devbits clipvideo --help
+clipvideo --help
 ```
 
 ## Commands
 
+### Video
+
 | Command | Description |
-|---|---|
-| `clearcache` | Clear Python cache files. |
-| `images2video` | Convert image sequence to MP4 video. |
+|---------|-------------|
+| `clipvideo` | Trim a video by time (seconds) or frame range. Includes `--gui` for browser-based editing. |
 | `video2images` | Extract frames from a video. |
-| `images2gif` | Convert image sequence to GIF. |
-| `video2gif` | Convert video to GIF. |
-| `clipvideo` | Clip video by seconds or frame indices. |
-| `resizevideo` | Resize a video. |
-| `image2ico` | Convert image to `.ico`. |
-| `resizeimage` | Resize an image. |
-| `batchimages` | Batch resize or convert images. |
-| `checkimages` | Check broken image files. |
-| `contactsheet` | Create a contact sheet. |
-| `tree` | Print a compact project tree. |
-| `size` | Show top-level folder/file sizes. |
-| `renamefiles` | Batch rename files. |
-| `samplefiles` | Copy or move first N files. |
+| `video2gif` | Convert a video (or a portion) to animated GIF. |
+| `images2video` | Assemble an image sequence into an MP4 video. |
+| `images2gif` | Assemble an image sequence into an animated GIF. |
+| `resizevideo` | Re-encode a video at a different resolution. |
 
-## Roadmap
+### Image
 
-- Interactive `clipvideo --gui`
-- `mergevideos`
-- `comparevideos`
-- `concatframes`
-- `annotatevideo`
-- `watermark`
-- `splitdataset`
-- `countdataset`
-- `dedupimages`
-- Optional ROS helpers under `devbits[ros]`
+| Command | Description |
+|---------|-------------|
+| `resizeimage` | Resize a single image (preserves aspect ratio by default). |
+| `image2ico` | Convert an image to a multi-size ICO file. |
+| `batchimages` | Batch resize or convert all images in a folder. |
+| `checkimages` | Scan for broken / corrupt image files. |
+| `contactsheet` | Generate a thumbnail grid (contact sheet) from a folder of images. |
+
+### Project / Files
+
+| Command | Description |
+|---------|-------------|
+| `clearcache` | Remove `__pycache__` and other Python cache directories. |
+| `tree` | Print a directory tree. |
+| `size` | List the largest files / folders, sorted by size. |
+| `renamefiles` | Batch rename files sequentially. |
+| `samplefiles` | Copy or move the first N files to another folder. |
+
+## Examples
+
+```bash
+# Trim video from 5s to 20s
+clipvideo movie.mp4 --start 5.0 --end 20.0
+
+# Open interactive clip editor in the browser
+clipvideo movie.mp4 --gui
+
+# Convert video to GIF (3.5s–10s at 15 fps)
+video2gif movie.mp4 --start 3.5 --end 10.0 --fps 15
+
+# Extract every 5th frame as PNG
+video2images movie.mp4 --every 5 --format png
+
+# Batch resize images to 800×600
+batchimages ./photos -o ./resized --size 800,600
+
+# Clean Python caches
+clearcache . --all
+```
+
+## Output Defaults
+
+When `-o` / `--output` is omitted, the output filename is derived from the input:
+
+```
+clipvideo movie.mp4          →  movie_clip.mp4
+video2gif movie.mp4          →  movie.gif
+resizeimage photo.jpg        →  photo_resized.jpg
+contactsheet ./photos        →  photos_sheet.jpg
+```
 
 ## License
 
