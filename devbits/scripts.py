@@ -47,6 +47,10 @@ def resizeimage() -> int:
     return _run("resizeimage")
 
 
+def recolor() -> int:
+    return _run("recolor")
+
+
 def batchimages() -> int:
     return _run("batchimages")
 

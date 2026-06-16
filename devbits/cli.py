@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .cache import clear_cache
-from .image import batch_images, check_images, contact_sheet, image_to_ico, resize_image
+from .image import batch_images, check_images, contact_sheet, image_to_ico, recolor_image, resize_image
 from .media import clip_video, images_to_gif, images_to_video, resize_video, video_to_gif, video_to_images
 from .project import print_tree, rename_files, sample_files, top_sizes
 from .utils import ensure_exists
@@ -237,6 +237,32 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Do not preserve aspect ratio; stretch to exact size.")
     p.set_defaults(func=cmd_resizeimage)
 
+    # ── recolor ────────────────────────────────────────────────
+    p = sub.add_parser(
+        "recolor",
+        help="Recolor the foreground of a logo / icon image.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Recolor a logo or icon. The background (transparent or a lighter\n"
+            "surrounding color) is detected automatically and left untouched,\n"
+            "while every foreground pixel is repainted with the target color.\n"
+            "The result is always saved as an RGBA PNG.\n\n"
+            "Examples:\n"
+            "  devbits recolor logo.png\n"
+            "  devbits recolor logo.png --color '#1a73e8'\n"
+            "  devbits recolor logo.png --color 0,178,179\n"
+            "  devbits recolor icon.jpg --color white --threshold 90"
+        ),
+    )
+    p.add_argument("image", type=Path, help="Input logo / icon image.")
+    p.add_argument("-o", "--output", type=Path, default=None,
+                   help="Output image path. Default: <image_stem>_revised.png")
+    p.add_argument("--color", default="black",
+                   help="Target foreground color: name, hex, or R,G,B (e.g. black, '#1a73e8', 0,178,179). Default: black")
+    p.add_argument("--threshold", type=int, default=60,
+                   help="Color distance from the background for opaque images. Default: 60")
+    p.set_defaults(func=cmd_recolor)
+
     # ── batchimages ────────────────────────────────────────────
     p = sub.add_parser(
         "batchimages",
@@ -450,6 +476,12 @@ def cmd_resizeimage(args: argparse.Namespace) -> None:
     image = ensure_exists(args.image)
     output = args.output or _derive_output(image, image.suffix, "resized")
     print(resize_image(image, output, args.size, not args.no_keep_ratio))
+
+
+def cmd_recolor(args: argparse.Namespace) -> None:
+    image = ensure_exists(args.image)
+    output = args.output or _derive_output(image, ".png", "revised")
+    print(recolor_image(image, output, args.color, args.threshold))
 
 
 def cmd_batchimages(args: argparse.Namespace) -> None:

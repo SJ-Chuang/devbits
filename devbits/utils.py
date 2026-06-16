@@ -46,6 +46,33 @@ def parse_size(size: str) -> tuple[int, int]:
     return width_i, height_i
 
 
+def parse_color(value: str) -> tuple[int, int, int]:
+    """Parse a color into an ``(R, G, B)`` tuple.
+
+    Accepts a CSS name (``black``), a hex value (``#1a73e8``), or a comma-/
+    space-separated ``R,G,B`` triple (``0,178,179``).
+    """
+    from PIL import ImageColor
+
+    text = value.strip()
+    if "," in text:
+        parts = [p.strip() for p in text.split(",") if p.strip()]
+        if len(parts) != 3:
+            raise ValueError(f"RGB color must have 3 components, got: {value!r}")
+        try:
+            channels = tuple(int(p) for p in parts)
+        except ValueError as exc:
+            raise ValueError(f"RGB components must be integers: {value!r}") from exc
+        if any(c < 0 or c > 255 for c in channels):
+            raise ValueError(f"RGB components must be in 0-255: {value!r}")
+        return channels  # type: ignore[return-value]
+
+    try:
+        return ImageColor.getrgb(text)[:3]
+    except ValueError as exc:
+        raise ValueError(f"Unrecognized color: {value!r}") from exc
+
+
 def parse_int_tuple(value: str, expected: int, name: str) -> tuple[int, ...]:
     try:
         items = tuple(int(x.strip()) for x in value.split(","))

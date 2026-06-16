@@ -47,6 +47,7 @@ clipvideo --help
 | Command | Description |
 |---------|-------------|
 | `resizeimage` | Resize a single image (preserves aspect ratio by default). |
+| `recolor` | Recolor a logo/icon foreground, leaving the background intact. |
 | `image2ico` | Convert an image to a multi-size ICO file. |
 | `batchimages` | Batch resize or convert all images in a folder. |
 | `checkimages` | Scan for broken / corrupt image files. |
@@ -77,6 +78,13 @@ video2gif movie.mp4 --start 3.5 --end 10.0 --fps 15
 # Extract every 5th frame as PNG
 video2images movie.mp4 --every 5 --format png
 
+# Recolor a logo's foreground to black (keeps the background)
+recolor logo.png
+
+# Recolor a logo's foreground to a custom color (hex or R,G,B)
+recolor logo.png --color '#1a73e8'
+recolor logo.png --color 0,178,179
+
 # Batch resize images to 800×600
 batchimages ./photos -o ./resized --size 800,600
 
@@ -92,6 +100,7 @@ When `-o` / `--output` is omitted, the output filename is derived from the input
 clipvideo movie.mp4          →  movie_clip.mp4
 video2gif movie.mp4          →  movie.gif
 resizeimage photo.jpg        →  photo_resized.jpg
+recolor logo.png             →  logo_revised.png
 contactsheet ./photos        →  photos_sheet.jpg
 ```
 
