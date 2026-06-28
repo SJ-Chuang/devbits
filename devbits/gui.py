@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import webbrowser
@@ -31,6 +33,7 @@ _HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Divbits.ClipVideo</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCA2NCA2NCc+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSdnJyB4MT0nMCcgeTE9JzAnIHgyPScxJyB5Mj0nMSc+PHN0b3Agb2Zmc2V0PScwJyBzdG9wLWNvbG9yPScjN2M1Y2ZjJy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjMDBkNGZmJy8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9JzY0JyBoZWlnaHQ9JzY0JyByeD0nMTUnIGZpbGw9J3VybCgjZyknLz48cGF0aCBkPSdNMjUgMTkgTDQ3IDMyIEwyNSA0NSBaJyBmaWxsPScjZmZmJy8+PC9zdmc+Cg==">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -142,6 +145,18 @@ body{
   cursor:pointer;transition:all 0.15s;
 }
 .media-add-btn:hover{background:#8d6eff;transform:scale(1.1)}
+.media-del-btn{
+  width:24px;height:24px;border-radius:50%;border:none;
+  background:rgba(255,60,60,.14);color:#ff6b6b;font-size:.85rem;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all 0.15s;flex-shrink:0;
+}
+.media-del-btn:hover{background:rgba(255,60,60,.3);transform:scale(1.1)}
+/* Sidebar drop-target highlight */
+.sidebar.drag-over{
+  background:rgba(124,92,252,.08);
+  outline:2px dashed rgba(124,92,252,.45);outline-offset:-6px;
+}
 
 /* ── Content Area (Right side) ─────────────────────────────── */
 .content-area{
@@ -388,6 +403,32 @@ kbd{
   margin-left:4px;
 }
 
+/* ── Context Menu ──────────────────────────────────────────── */
+.context-menu{
+  position:fixed;z-index:3000;min-width:172px;
+  background:#16162b;border:1px solid rgba(255,255,255,.1);
+  border-radius:10px;padding:6px;
+  box-shadow:0 12px 40px rgba(0,0,0,.55);
+  font-size:.82rem;user-select:none;
+}
+.ctx-item{
+  display:flex;align-items:center;gap:9px;
+  padding:8px 10px;border-radius:6px;cursor:pointer;color:#d0d0e4;
+}
+.ctx-item:hover{background:rgba(124,92,252,.2)}
+.ctx-item.danger{color:#ff6b6b}
+.ctx-item.danger:hover{background:rgba(255,60,60,.18)}
+.ctx-item kbd{margin-left:auto}
+.ctx-sep{height:1px;background:rgba(255,255,255,.08);margin:6px 4px}
+.ctx-label{font-size:.66rem;color:#777799;text-transform:uppercase;letter-spacing:.6px;padding:6px 10px 2px}
+.ctx-speeds{display:flex;flex-wrap:wrap;gap:5px;padding:4px 8px 6px}
+.ctx-speed{
+  padding:4px 9px;border-radius:5px;background:rgba(255,255,255,.06);
+  color:#c0c0da;cursor:pointer;font-size:.74rem;transition:all .12s;
+}
+.ctx-speed:hover{background:rgba(124,92,252,.35)}
+.ctx-speed.active{background:#7c5cfc;color:#fff}
+
 /* ── Responsive ────────────────────────────────────────────── */
 @media(max-width:850px){
   .main{flex-direction:column}
@@ -410,7 +451,7 @@ kbd{
 <!-- Main Layout -->
 <div class="main">
   <!-- Sidebar (Media Library) -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <h3>Media Library</h3>
     <button class="btn btn-primary" onclick="openFile()" style="margin-bottom: 12px; justify-content: center; width: 100%;">
       📂 Import media
@@ -434,11 +475,15 @@ kbd{
 
     <!-- Playback Controls -->
     <div class="controls-bar">
-      <button class="step-btn" onclick="seekTimeline(0)" title="Jump to start">⏮⏮</button>
+      <button class="step-btn" onclick="seekTimeline(0)" title="Jump to start">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="5" y="5" width="2.6" height="14" rx="1"/><path d="M20 5v14L9.5 12z"/></svg>
+      </button>
       <button class="step-btn" onclick="stepFrame(-1)" title="Previous frame">⏮</button>
       <button class="play-btn" id="playBtn" onclick="togglePlay()" title="Play/Pause (Space)">▶</button>
       <button class="step-btn" onclick="stepFrame(1)" title="Next frame">⏭</button>
-      <button class="step-btn" onclick="seekTimeline(getTotalDuration())" title="Jump to end">⏭⏭</button>
+      <button class="step-btn" onclick="seekTimeline(getTotalDuration())" title="Jump to end">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M4 5v14l10.5-7z"/><rect x="16.4" y="5" width="2.6" height="14" rx="1"/></svg>
+      </button>
       <span class="time" id="timeDisplay">0:00.000 / 0:00.000</span>
 
       <div class="speed-group">
@@ -508,6 +553,18 @@ kbd{
   </div>
 </div>
 
+<!-- Confirm Modal -->
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal" style="min-width:340px">
+    <h2 id="confirmTitle">Confirm</h2>
+    <p id="confirmMessage" style="color:#b0b0c8;font-size:.9rem;line-height:1.5;margin-top:4px"></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="hideConfirm()">Cancel</button>
+      <button class="btn btn-danger" id="confirmOk" onclick="runConfirm()">Delete</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -528,7 +585,10 @@ let isChangingSource = false;
 let isScrubbing = false;
 let wasPlayingBeforeScrub = false;
 
-const PX_PER_SEC = 80;
+let PX_PER_SEC = 80;   // timeline scale (px per second); changed by Ctrl+wheel zoom
+const PX_PER_SEC_MIN = 10;
+const PX_PER_SEC_MAX = 800;
+const TIMELINE_PAD = 16; // matches .timeline-track-wrapper horizontal padding
 const CLIP_GAP = 3; // px gap between clips
 
 // ── Duration Helper ────────────────────────────────────────────
@@ -628,18 +688,54 @@ function renderMediaLibrary() {
       addMediaToTimeline(item);
     };
 
+    const delBtn = document.createElement('button');
+    delBtn.className = 'media-del-btn';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Remove from library';
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      showConfirm(`Remove "${item.name}" from the media library?`, () => removeMediaFromLibrary(item.id));
+    };
+
     // Drag from media library to timeline
     card.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.media-add-btn')) return;
+      if (e.target.closest('.media-add-btn') || e.target.closest('.media-del-btn')) return;
       startMediaLibraryDrag(e, item, card);
     });
 
     card.appendChild(thumb);
     card.appendChild(info);
     card.appendChild(addBtn);
+    card.appendChild(delBtn);
 
     list.appendChild(card);
   });
+}
+
+function removeMediaFromLibrary(id) {
+  const idx = mediaLibrary.findIndex(m => m.id === id);
+  if (idx === -1) return;
+  const [removed] = mediaLibrary.splice(idx, 1);
+  renderMediaLibrary();
+  toast(`Removed "${removed.name}"`);
+}
+
+// ── Confirm Modal ──────────────────────────────────────────────
+let _confirmCb = null;
+function showConfirm(message, onYes, okLabel = 'Delete') {
+  _confirmCb = onYes;
+  document.getElementById('confirmMessage').textContent = message;
+  document.getElementById('confirmOk').textContent = okLabel;
+  document.getElementById('confirmModal').classList.add('show');
+}
+function hideConfirm() {
+  document.getElementById('confirmModal').classList.remove('show');
+  _confirmCb = null;
+}
+function runConfirm() {
+  const cb = _confirmCb;
+  hideConfirm();
+  if (cb) cb();
 }
 
 function addMediaToTimeline(media, insertAtIndex = -1) {
@@ -678,6 +774,11 @@ function handleFileInput(e) {
 }
 
 async function uploadAndLoad(file) {
+  // Skip files already present in the library (match by name).
+  if (mediaLibrary.some(m => m.name === file.name)) {
+    toast(`"${file.name}" is already in the library`);
+    return;
+  }
   const formData = new FormData();
   formData.append('file', file);
   try {
@@ -702,6 +803,28 @@ const dropZone = document.getElementById('dropZone');
   previewArea.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove('active'); });
 });
 previewArea.addEventListener('drop', e => {
+  const files = Array.from(e.dataTransfer.files);
+  files.forEach(file => {
+    if (file.type.startsWith('video/')) {
+      uploadAndLoad(file);
+    }
+  });
+});
+
+// Drag & drop onto the Media Library sidebar (import area)
+const sidebar = document.getElementById('sidebar');
+['dragenter','dragover'].forEach(ev => {
+  sidebar.addEventListener(ev, e => { e.preventDefault(); sidebar.classList.add('drag-over'); });
+});
+['dragleave','drop'].forEach(ev => {
+  sidebar.addEventListener(ev, e => {
+    e.preventDefault();
+    // Ignore dragleave that fires while moving over child elements.
+    if (ev === 'dragleave' && e.relatedTarget && sidebar.contains(e.relatedTarget)) return;
+    sidebar.classList.remove('drag-over');
+  });
+});
+sidebar.addEventListener('drop', e => {
   const files = Array.from(e.dataTransfer.files);
   files.forEach(file => {
     if (file.type.startsWith('video/')) {
@@ -937,6 +1060,12 @@ function setupTimelineInteraction() {
 
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
+    // Ignore clicks on the horizontal scrollbar (below the client area) so
+    // dragging the scrollbar doesn't scrub the timeline.
+    if (e.target === wrapper) {
+      const r = wrapper.getBoundingClientRect();
+      if (e.clientY > r.top + wrapper.clientHeight || e.clientX > r.left + wrapper.clientWidth) return;
+    }
     if (e.target.closest('.trim-handle') || e.target.closest('.btn-danger')) return;
     // Don't start scrubbing if a drag is starting on a clip block
     if (e.target.closest('.clip-block') && !e.target.closest('.trim-handle')) {
@@ -976,6 +1105,29 @@ function setupTimelineInteraction() {
   };
 
   wrapper.addEventListener('mousedown', onMouseDown);
+
+  // Ctrl/⌘ + wheel (or trackpad pinch) zooms the timeline around the cursor.
+  wrapper.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return; // plain scroll: let the browser scroll
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomTimelineAt(e.clientX, factor);
+  }, { passive: false });
+}
+
+// Zoom the timeline keeping the time under `clientX` pinned to the cursor.
+function zoomTimelineAt(clientX, factor) {
+  const wrapper = document.getElementById('trackWrapper');
+  const content = document.getElementById('timelineContent');
+  const t = (clientX - content.getBoundingClientRect().left) / PX_PER_SEC;
+
+  PX_PER_SEC = Math.max(PX_PER_SEC_MIN, Math.min(PX_PER_SEC_MAX, PX_PER_SEC * factor));
+
+  renderTimeline();
+  updatePlayhead();
+
+  const wrapRect = wrapper.getBoundingClientRect();
+  wrapper.scrollLeft = Math.max(0, wrapRect.left + TIMELINE_PAD + t * PX_PER_SEC - clientX);
 }
 
 // ── Clip Drag & Drop Reorder ──────────────────────────────────
@@ -1041,15 +1193,8 @@ function startClipDrag(e, clipEl, clipId) {
     if (ghost) { ghost.remove(); ghost = null; }
 
     if (!dragging) {
-      // Was just a click, not a drag — seek to clip
-      isScrubbing = true;
-      wasPlayingBeforeScrub = !video.paused;
-      if (wasPlayingBeforeScrub) video.pause();
-      handleTimelineClick(ev);
-      isScrubbing = false;
-      if (wasPlayingBeforeScrub) {
-        video.play().catch(e => console.log("Play interrupted:", e));
-      }
+      // Just a click on a clip — selection already happened on mousedown.
+      // Do NOT move the playhead; only clicking the empty timeline scrubs.
       return;
     }
 
@@ -1217,6 +1362,8 @@ function renderTimeline() {
     rh.addEventListener('mousedown', e => startTrim(e, clip, 'right'));
     el.appendChild(rh);
 
+    el.addEventListener('contextmenu', e => showClipContextMenu(e, clip.id, el));
+
     track.appendChild(el);
     accTime += clipDur;
   });
@@ -1229,6 +1376,23 @@ function renderTimeline() {
 }
 
 
+
+// Lightweight re-layout of existing clip DOM nodes (no rebuild → smooth dragging)
+function layoutClips() {
+  const track = document.getElementById('track');
+  let accTime = 0;
+  clips.forEach((clip, i) => {
+    const el = track.querySelector(`.clip-block[data-clip-id="${clip.id}"]`);
+    const clipDur = (clip.endTime - clip.startTime) / clip.speed;
+    if (el) {
+      el.style.left = (accTime * PX_PER_SEC + i * CLIP_GAP) + 'px';
+      el.style.width = (clipDur * PX_PER_SEC) + 'px';
+      const lbl = el.querySelector('.clip-label');
+      if (lbl) lbl.innerHTML = `${clip.name}<small>${clipDur.toFixed(1)}s · ${clip.speed}×</small>`;
+    }
+    accTime += clipDur;
+  });
+}
 
 function updateClipInfo() {
   const el = document.getElementById('clipInfo');
@@ -1244,9 +1408,13 @@ function renderRuler() {
   const ruler = document.getElementById('ruler');
   ruler.innerHTML = '';
   const totalDuration = getTotalDuration();
-  const step = totalDuration > 120 ? 30 : totalDuration > 60 ? 10 : totalDuration > 10 ? 2 : 1;
+  // Pick a step so labels keep at least ~60px apart at the current zoom.
+  const minPx = 60;
+  const candidates = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  let step = candidates[candidates.length - 1];
+  for (const c of candidates) { if (c * PX_PER_SEC >= minPx) { step = c; break; } }
 
-  for (let t = 0; t <= totalDuration; t += step) {
+  for (let t = 0; t <= totalDuration + 1e-9; t += step) {
     const mk = document.createElement('div');
     mk.className = 'ruler-mark';
     mk.style.left = (t * PX_PER_SEC) + 'px';
@@ -1279,23 +1447,39 @@ function startTrim(e, clip, side) {
 
   loadVideoSource(clip.src, side === 'left' ? clip.startTime : clip.endTime);
 
+  // Throttle preview seeks to one per animation frame to avoid decode thrash.
+  let pendingSeek = null;
+  let rafId = null;
+  const flushSeek = () => {
+    rafId = null;
+    if (pendingSeek !== null && !isChangingSource) {
+      video.currentTime = pendingSeek;
+      pendingSeek = null;
+    }
+  };
+
   const onMove = ev => {
     const dx = ev.clientX - startX;
     const dt = dx / PX_PER_SEC;
 
     if (side === 'left') {
       clip.startTime = Math.max(0, Math.min(clip.endTime - 0.1, origStart + dt));
-      video.currentTime = clip.startTime;
+      pendingSeek = clip.startTime;
     } else {
       clip.endTime = Math.max(clip.startTime + 0.1, Math.min(clip.duration, origEnd + dt));
-      video.currentTime = clip.endTime;
+      pendingSeek = clip.endTime;
     }
-    renderTimeline();
+    // Re-layout existing nodes instead of rebuilding the whole timeline.
+    layoutClips();
+    updateClipInfo();
+    if (rafId === null) rafId = requestAnimationFrame(flushSeek);
   };
 
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    renderTimeline();
     seekTimeline(getTimelineStartOfClip(clipIndex) + (side === 'left' ? 0 : (clip.endTime - clip.startTime) / clip.speed));
   };
 
@@ -1306,40 +1490,26 @@ function startTrim(e, clip, side) {
 // ── Clip Operations ────────────────────────────────────────────
 function splitAtPlayhead() {
   if (clips.length === 0 || isChangingSource) return;
-
   const clip = clips[activeClipIndex];
   if (!clip) return;
+  splitClipAt(clip.id, video.currentTime);
+}
 
-  const t = video.currentTime;
+// Split a specific clip at a source-time `t` (seconds within the source video).
+function splitClipAt(clipId, t) {
+  const idx = clips.findIndex(c => c.id === clipId);
+  if (idx === -1) return;
+  const clip = clips[idx];
   if (t <= clip.startTime + 0.1 || t >= clip.endTime - 0.1) {
-    toast('Move playhead inside a clip to split');
+    toast('Move the cut point inside the clip to split');
     return;
   }
 
-  const newClip1 = {
-    id: ++clipIdCounter,
-    src: clip.src,
-    name: clip.name,
-    startTime: clip.startTime,
-    endTime: t,
-    speed: clip.speed,
-    duration: clip.duration,
-    hue: clip.hue
-  };
+  const newClip1 = { ...clip, id: ++clipIdCounter, endTime: t, hue: clip.hue };
+  const newClip2 = { ...clip, id: ++clipIdCounter, startTime: t, hue: (hueCounter++ * 37 + 230) % 360 };
 
-  const newClip2 = {
-    id: ++clipIdCounter,
-    src: clip.src,
-    name: clip.name,
-    startTime: t,
-    endTime: clip.endTime,
-    speed: clip.speed,
-    duration: clip.duration,
-    hue: (hueCounter++ * 37 + 230) % 360
-  };
-
-  clips.splice(activeClipIndex, 1, newClip1, newClip2);
-  activeClipIndex = activeClipIndex + 1;
+  clips.splice(idx, 1, newClip1, newClip2);
+  activeClipIndex = idx + 1;
   selectedClipId = newClip2.id;
 
   renderTimeline();
@@ -1368,6 +1538,84 @@ function deleteSelected() {
   renderTimeline();
   toast('Clip deleted');
 }
+
+// ── Clip Context Menu ──────────────────────────────────────────
+const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4];
+let ctxMenuEl = null;
+
+function closeContextMenu() {
+  if (ctxMenuEl) { ctxMenuEl.remove(); ctxMenuEl = null; }
+}
+
+function showClipContextMenu(e, clipId, clipEl) {
+  e.preventDefault();
+  e.stopPropagation();
+  closeContextMenu();
+
+  const clip = clips.find(c => c.id === clipId);
+  if (!clip) return;
+  selectClip(clipId);
+
+  // Source time at the cursor (used as the split point).
+  const r = clipEl.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const splitTime = clip.startTime + frac * (clip.endTime - clip.startTime);
+
+  const menu = document.createElement('div');
+  menu.className = 'context-menu';
+
+  const split = document.createElement('div');
+  split.className = 'ctx-item';
+  split.innerHTML = `<span>✂</span><span>Split here</span><kbd>S</kbd>`;
+  split.onclick = () => { closeContextMenu(); splitClipAt(clipId, splitTime); };
+  menu.appendChild(split);
+
+  const del = document.createElement('div');
+  del.className = 'ctx-item danger';
+  del.innerHTML = `<span>🗑</span><span>Delete</span><kbd>Del</kbd>`;
+  del.onclick = () => {
+    closeContextMenu();
+    showConfirm(`Delete this clip ("${clip.name}") from the timeline?`, () => {
+      selectedClipId = clipId;
+      deleteSelected();
+    });
+  };
+  menu.appendChild(del);
+
+  menu.appendChild(Object.assign(document.createElement('div'), { className: 'ctx-sep' }));
+  menu.appendChild(Object.assign(document.createElement('div'), { className: 'ctx-label', textContent: 'Speed' }));
+
+  const speeds = document.createElement('div');
+  speeds.className = 'ctx-speeds';
+  SPEED_OPTIONS.forEach(spd => {
+    const chip = document.createElement('div');
+    chip.className = 'ctx-speed' + (clip.speed === spd ? ' active' : '');
+    chip.textContent = spd + '×';
+    chip.onclick = () => { selectClip(clipId); setSpeed(spd); closeContextMenu(); };
+    speeds.appendChild(chip);
+  });
+  menu.appendChild(speeds);
+
+  // Position within the viewport.
+  document.body.appendChild(menu);
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  const x = Math.min(e.clientX, window.innerWidth - mw - 8);
+  const y = Math.min(e.clientY, window.innerHeight - mh - 8);
+  menu.style.left = Math.max(8, x) + 'px';
+  menu.style.top = Math.max(8, y) + 'px';
+  ctxMenuEl = menu;
+}
+
+// Dismiss the context menu on outside interaction.
+document.addEventListener('mousedown', e => {
+  if (ctxMenuEl && !ctxMenuEl.contains(e.target)) closeContextMenu();
+});
+window.addEventListener('blur', closeContextMenu);
+window.addEventListener('resize', closeContextMenu);
+document.addEventListener('DOMContentLoaded', () => {
+  const tw = document.getElementById('trackWrapper');
+  if (tw) tw.addEventListener('scroll', closeContextMenu);
+});
 
 
 
@@ -1451,6 +1699,7 @@ async function doExport() {
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   switch (e.code) {
+    case 'Escape': closeContextMenu(); break;
     case 'Space': e.preventDefault(); togglePlay(); break;
     case 'KeyS': splitAtPlayhead(); break;
     case 'Delete': case 'Backspace': deleteSelected(); break;
@@ -1486,6 +1735,53 @@ function toast(msg, isError) {
 
 # Shared mutable export progress (written by export thread, read by poll handler)
 _export_progress = {"progress": 0}
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg fast-path helpers
+# ---------------------------------------------------------------------------
+
+def _ffmpeg_bin() -> str | None:
+    """Return the ffmpeg executable path if available, else None (cached)."""
+    if not hasattr(_ffmpeg_bin, "_cached"):
+        _ffmpeg_bin._cached = shutil.which("ffmpeg")
+    return _ffmpeg_bin._cached
+
+
+def _ffprobe_bin() -> str | None:
+    if not hasattr(_ffprobe_bin, "_cached"):
+        _ffprobe_bin._cached = shutil.which("ffprobe")
+    return _ffprobe_bin._cached
+
+
+def _has_audio(path: Path) -> bool:
+    """Return True if the media file contains at least one audio stream."""
+    probe = _ffprobe_bin()
+    if not probe:
+        return False
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        return "audio" in out.stdout
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _atempo_factors(speed: float) -> list[float]:
+    """Decompose a playback-rate change into atempo factors within [0.5, 2.0]."""
+    factors: list[float] = []
+    s = speed
+    while s > 2.0 + 1e-9:
+        factors.append(2.0)
+        s /= 2.0
+    while s < 0.5 - 1e-9:
+        factors.append(0.5)
+        s /= 0.5
+    factors.append(round(s, 6))
+    return factors
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1675,7 +1971,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            out_path = self._do_export(clip_defs, fmt, filename, resolution)
+            if _ffmpeg_bin():
+                try:
+                    out_path = self._ffmpeg_export(clip_defs, fmt, filename, resolution)
+                except Exception:
+                    # ffmpeg path failed — fall back to the pure-Python encoder
+                    out_path = self._do_export(clip_defs, fmt, filename, resolution)
+            else:
+                out_path = self._do_export(clip_defs, fmt, filename, resolution)
             self._json_response({"success": True, "path": str(out_path)})
         except Exception as exc:
             self._json_response({"error": str(exc)}, 500)
@@ -1691,6 +1994,146 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             name = src.split("/")[-1]
             return Path(self.upload_dir) / name
+
+    def _ffmpeg_export(self, clip_defs: list[dict], fmt: str, filename: str, resolution: int = 0) -> Path:
+        """Fast export via ffmpeg: trim + speed + scale + concat in one multithreaded pass.
+
+        Far faster than the frame-by-frame cv2 path (hardware/SIMD encoders, no
+        per-frame Python overhead) and preserves audio when every clip has it.
+        """
+        global _export_progress
+        _export_progress["progress"] = 0
+
+        ffmpeg = _ffmpeg_bin()
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg not available")
+
+        srcs = [self._resolve_clip_src(c["src"]) for c in clip_defs]
+
+        # Target geometry / fps come from the first clip (concat needs uniform size).
+        first = cv2.VideoCapture(str(srcs[0]))
+        if not first.isOpened():
+            raise RuntimeError(f"Cannot open video: {srcs[0]}")
+        src_fps = first.get(cv2.CAP_PROP_FPS) or 30.0
+        orig_w = int(first.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(first.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        first.release()
+        if orig_w <= 0 or orig_h <= 0:
+            raise RuntimeError("Could not determine source dimensions")
+
+        if resolution > 0:
+            w = resolution
+            h = int(orig_h * (resolution / orig_w))
+        else:
+            w, h = orig_w, orig_h
+        w += w % 2
+        h += h % 2  # codecs require even dimensions
+
+        is_gif = fmt == "gif"
+        out_fps = min(src_fps, 15.0) if is_gif else src_fps
+        # Audio only when every clip has it (concat needs matching stream sets).
+        want_audio = (not is_gif) and all(_has_audio(s) for s in srcs)
+
+        total_out_dur = 0.0
+        for c in clip_defs:
+            speed = float(c.get("speed", 1.0)) or 1.0
+            total_out_dur += max(0.0, (c["endTime"] - c["startTime"]) / speed)
+        total_out_dur = max(total_out_dur, 0.001)
+
+        # ── Build filter graph ──────────────────────────────────────
+        inputs: list[str] = []
+        for s in srcs:
+            inputs += ["-i", str(s)]
+
+        parts: list[str] = []
+        concat_labels: list[str] = []
+        for i, c in enumerate(clip_defs):
+            start = float(c["startTime"])
+            end = float(c["endTime"])
+            speed = float(c.get("speed", 1.0)) or 1.0
+            vlbl = f"v{i}"
+            parts.append(
+                f"[{i}:v]trim=start={start}:end={end},setpts=(PTS-STARTPTS)/{speed},"
+                f"fps={out_fps},scale={w}:{h}:flags=bicubic,setsar=1[{vlbl}]"
+            )
+            concat_labels.append(f"[{vlbl}]")
+            if want_audio:
+                albl = f"a{i}"
+                atempo = ",".join(f"atempo={f}" for f in _atempo_factors(speed))
+                parts.append(
+                    f"[{i}:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,{atempo}[{albl}]"
+                )
+                concat_labels.append(f"[{albl}]")
+
+        n = len(clip_defs)
+        if want_audio:
+            parts.append("".join(concat_labels) + f"concat=n={n}:v=1:a=1[vc][outa]")
+            vcat = "[vc]"
+        else:
+            parts.append("".join(concat_labels) + f"concat=n={n}:v=1:a=0[vc]")
+            vcat = "[vc]"
+
+        if is_gif:
+            parts.append(
+                f"{vcat}split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+                f"[s1][p]paletteuse=dither=bayer[outv]"
+            )
+            vmap = "[outv]"
+        else:
+            vmap = vcat
+
+        filtergraph = ";".join(parts)
+
+        out_path = Path(self.export_dir) / f"{filename}.{fmt}"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [ffmpeg, "-y", "-v", "error", "-progress", "pipe:1", "-nostats",
+               *inputs, "-filter_complex", filtergraph, "-map", vmap]
+        if want_audio:
+            cmd += ["-map", "[outa]"]
+
+        if not is_gif:
+            codec = {"mp4": "libx264", "avi": "mpeg4", "webm": "libvpx"}.get(fmt, "libx264")
+            cmd += ["-c:v", codec]
+            if codec == "libx264":
+                cmd += ["-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart"]
+            elif codec == "libvpx":
+                cmd += ["-b:v", "2M", "-deadline", "realtime", "-cpu-used", "5"]
+            else:  # mpeg4 / avi
+                cmd += ["-qscale:v", "4"]
+            if want_audio:
+                acodec = {"webm": "libvorbis"}.get(fmt, "aac")
+                cmd += ["-c:a", acodec]
+        cmd.append(str(out_path))
+
+        self._run_ffmpeg(cmd, total_out_dur)
+        _export_progress["progress"] = 100
+        return out_path
+
+    def _run_ffmpeg(self, cmd: list[str], total_dur: float) -> None:
+        """Run ffmpeg, streaming -progress output into _export_progress."""
+        global _export_progress
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_ms=") or line.startswith("out_time_us="):
+                    try:
+                        secs = int(line.split("=", 1)[1]) / 1_000_000.0
+                        _export_progress["progress"] = min(99, int(secs / total_dur * 100))
+                    except ValueError:
+                        pass
+        finally:
+            proc.stdout.close()
+            stderr = proc.stderr.read()
+            proc.stderr.close()
+            ret = proc.wait()
+        if ret != 0:
+            raise RuntimeError(f"ffmpeg failed: {stderr.strip()[-500:]}")
 
     def _do_export(self, clip_defs: list[dict], fmt: str, filename: str, resolution: int = 0) -> Path:
         """Run the actual export using cv2."""
@@ -1812,19 +2255,23 @@ class _Handler(BaseHTTPRequestHandler):
                     speed = clip.get("speed", 1.0)
                     step = max(1.0, speed)
 
+                    # Read sequentially (decoders are optimized for forward reads);
+                    # seeking per-frame with cap.set() is orders of magnitude slower.
                     cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
-                    fi = float(start_f)
+                    fi = start_f
+                    next_write = float(start_f)
                     while fi <= end_f:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
                         ok, frame = cap.read()
                         if not ok:
                             break
-                        if frame.shape[1] != w or frame.shape[0] != h:
-                            frame = cv2.resize(frame, (w, h))
-                        writer.write(frame)
-                        processed_frames += 1
-                        _export_progress["progress"] = int(processed_frames / total_frames * 95)
-                        fi += step
+                        if fi >= next_write - 1e-9:
+                            if frame.shape[1] != w or frame.shape[0] != h:
+                                frame = cv2.resize(frame, (w, h))
+                            writer.write(frame)
+                            processed_frames += 1
+                            _export_progress["progress"] = int(processed_frames / total_frames * 95)
+                            next_write += step
+                        fi += 1
                     cap.release()
             finally:
                 writer.release()

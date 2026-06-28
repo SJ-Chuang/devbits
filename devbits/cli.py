@@ -154,12 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Trim a portion of a video. You can specify the range in seconds\n"
             "(--start / --end) or in frame indices (--start-frame / --end-frame).\n"
-            "If both are omitted, the full video is copied.\n\n"
-            "Use --gui to open the interactive browser-based clip editor.\n\n"
+            "If no range is given, the interactive browser-based editor opens.\n\n"
             "Examples:\n"
+            "  devbits clipvideo movie.mp4                 # opens the GUI editor\n"
             "  devbits clipvideo movie.mp4 --start 5.0 --end 20.0\n"
             "  devbits clipvideo movie.mp4 --start-frame 150 --end-frame 600\n"
-            "  devbits clipvideo movie.mp4 --gui"
+            "  devbits clipvideo --gui                     # GUI with no initial video"
         ),
     )
     p.add_argument("video", type=Path, nargs="?", default=None,
@@ -449,7 +449,10 @@ def cmd_video2gif(args: argparse.Namespace) -> None:
 
 
 def cmd_clipvideo(args: argparse.Namespace) -> None:
-    if args.gui:
+    has_range = any(v is not None for v in (args.start, args.end, args.start_frame, args.end_frame))
+    # Open the interactive editor when --gui is set, or by default when a video
+    # is provided without an explicit trim range.
+    if args.gui or (args.video is not None and not has_range):
         from .gui import launch_gui
         launch_gui(args.video)
         return
