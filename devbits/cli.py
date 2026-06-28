@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__
 from .cache import clear_cache
 from .image import batch_images, check_images, contact_sheet, image_to_ico, recolor_image, resize_image
 from .media import clip_video, images_to_gif, images_to_video, resize_video, video_to_gif, video_to_images
@@ -32,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Daily development utility CLI toolkit.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version="devbits 0.1.0")
+    parser.add_argument("--version", action="version", version=f"devbits {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── clearcache ─────────────────────────────────────────────
