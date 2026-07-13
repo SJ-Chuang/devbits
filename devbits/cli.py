@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +11,32 @@ from .image import batch_images, check_images, contact_sheet, image_to_ico, reco
 from .media import clip_video, images_to_gif, images_to_video, resize_video, video_to_gif, video_to_images
 from .project import print_tree, rename_files, sample_files, top_sizes
 from .utils import ensure_exists
+
+
+# ---------------------------------------------------------------------------
+# Helper: terminal colors
+# ---------------------------------------------------------------------------
+
+_ANSI = {"dir": "\033[1;34m", "file": "\033[0m", "size": "\033[36m", "reset": "\033[0m"}
+
+
+def _use_color(force: bool | None = None) -> bool:
+    """Whether to emit ANSI colors: only on a TTY, unless overridden.
+
+    Honors the ``NO_COLOR`` convention (https://no-color.org). ``force`` of
+    ``True``/``False`` bypasses auto-detection (e.g. from a ``--no-color`` flag).
+    """
+    if force is not None:
+        return force
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _colorize(text: str, kind: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"{_ANSI[kind]}{text}{_ANSI['reset']}"
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Root folder to display. Default: current directory")
     p.add_argument("--depth", type=int, default=3,
                    help="Maximum depth to traverse. Default: 3")
+    p.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
     p.set_defaults(func=cmd_tree)
 
     # ── size ───────────────────────────────────────────────────
@@ -362,6 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Folder to inspect. Default: current directory")
     p.add_argument("--top", type=int, default=20,
                    help="Number of items to show. Default: 20")
+    p.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
     p.set_defaults(func=cmd_size)
 
     # ── renamefiles ────────────────────────────────────────────
@@ -509,13 +540,28 @@ def cmd_contactsheet(args: argparse.Namespace) -> None:
 
 
 def cmd_tree(args: argparse.Namespace) -> None:
+    color = _use_color(False if args.no_color else None)
     for line in print_tree(ensure_exists(args.folder), args.depth):
-        print(line)
+        if not color:
+            print(line)
+            continue
+        # Color only the name, leaving the tree-drawing prefix untouched.
+        marker = "── "
+        idx = line.rfind(marker)
+        split = idx + len(marker) if idx != -1 else 0
+        prefix, name = line[:split], line[split:]
+        kind = "dir" if name.endswith("/") else "file"
+        print(f"{prefix}{_colorize(name, kind, color)}")
 
 
 def cmd_size(args: argparse.Namespace) -> None:
+    color = _use_color(False if args.no_color else None)
     for path, _, size_text in top_sizes(ensure_exists(args.folder), args.top):
-        print(f"{size_text:>10}  {path}")
+        kind = "dir" if path.is_dir() else "file"
+        label = f"{path}{os.sep}" if path.is_dir() else str(path)
+        size_col = _colorize(f"{size_text:>10}", "size", color)
+        name_col = _colorize(label, kind, color)
+        print(f"{size_col}  {name_col}")
 
 
 def cmd_renamefiles(args: argparse.Namespace) -> None:

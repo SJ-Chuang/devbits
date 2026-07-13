@@ -108,5 +108,5 @@ def iter_project_tree(root: Path, ignore: Iterable[str], max_depth: int) -> list
                 walk(child, prefix + extension, depth + 1)
 
     lines.append(f"{root.name}/")
-    walk(root, max_depth=max_depth)
+    walk(root)
     return lines
