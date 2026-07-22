@@ -9,6 +9,7 @@ from . import __version__
 from .cache import clear_cache
 from .image import batch_images, check_images, contact_sheet, image_to_ico, recolor_image, resize_image
 from .media import clip_video, images_to_gif, images_to_video, resize_video, video_to_gif, video_to_images
+from .network import scan_network
 from .project import print_tree, rename_files, sample_files, top_sizes
 from .utils import ensure_exists
 
@@ -17,7 +18,18 @@ from .utils import ensure_exists
 # Helper: terminal colors
 # ---------------------------------------------------------------------------
 
-_ANSI = {"dir": "\033[1;34m", "file": "\033[0m", "size": "\033[36m", "reset": "\033[0m"}
+_ANSI = {
+    "dir": "\033[1;34m",
+    "file": "\033[0m",
+    "size": "\033[36m",
+    "header": "\033[1m",
+    "self": "\033[1;32m",
+    "gateway": "\033[1;33m",
+    "mac": "\033[36m",
+    "host": "\033[35m",
+    "vendor": "\033[33m",
+    "reset": "\033[0m",
+}
 
 
 def _use_color(force: bool | None = None) -> bool:
@@ -441,6 +453,39 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Move files instead of copying.")
     p.set_defaults(func=cmd_samplefiles)
 
+    # ── netscan ────────────────────────────────────────────────
+    p = sub.add_parser(
+        "netscan",
+        help="List devices connected to the local network (Wi-Fi / router).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Discover hosts on your local subnet with a threaded ping sweep, then\n"
+            "report each device's IP, MAC address, and hostname. This machine and\n"
+            "the router (default gateway) are highlighted.\n\n"
+            "Scan only your own network; probing networks you don't administer may\n"
+            "violate policy or law.\n\n"
+            "Examples:\n"
+            "  devbits netscan\n"
+            "  devbits netscan --lookup                    # also show manufacturer\n"
+            "  devbits netscan --network 192.168.1.0/24\n"
+            "  devbits netscan --timeout 0.5 --workers 128 --no-resolve"
+        ),
+    )
+    p.add_argument("--network", metavar="CIDR", default=None,
+                   help="Subnet to scan in CIDR, e.g. 192.168.1.0/24. Default: auto-detected.")
+    p.add_argument("--timeout", type=float, default=1.0,
+                   help="Per-host ping timeout in seconds. Default: 1.0")
+    p.add_argument("--workers", type=int, default=64,
+                   help="Number of concurrent ping workers. Default: 64")
+    p.add_argument("--no-resolve", action="store_true",
+                   help="Skip reverse-DNS hostname lookups (faster).")
+    p.add_argument("--lookup", action="store_true",
+                   help="Resolve each device's manufacturer online via macvendors.com "
+                        "(sends MAC prefixes to a third-party service).")
+    p.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
+    p.set_defaults(func=cmd_netscan)
+
     return parser
 
 
@@ -574,6 +619,37 @@ def cmd_renamefiles(args: argparse.Namespace) -> None:
 def cmd_samplefiles(args: argparse.Namespace) -> None:
     outputs = sample_files(ensure_exists(args.folder), args.output, args.num, copy=not args.move)
     print(f"Saved {len(outputs)} file(s) to {args.output}")
+
+
+def cmd_netscan(args: argparse.Namespace) -> None:
+    import ipaddress
+
+    color = _use_color(False if args.no_color else None)
+    network = ipaddress.ip_network(args.network, strict=False) if args.network else None
+
+    from .network import default_network
+    net = network or default_network()
+    print(f"Scanning {net} ...", file=sys.stderr)
+
+    if args.lookup:
+        print("Looking up device manufacturers online ...", file=sys.stderr)
+    devices = scan_network(
+        net, timeout=args.timeout, workers=args.workers,
+        resolve=not args.no_resolve, lookup=args.lookup,
+    )
+
+    vendor_col_head = f"{'VENDOR':<24}" if args.lookup else ""
+    header = f"{'IP':<16}{'MAC':<20}{vendor_col_head}{'HOSTNAME':<28}NOTE"
+    print(_colorize(header, "header", color))
+    for device in devices:
+        note = "this device" if device.is_self else ("gateway / router" if device.is_gateway else "")
+        kind = "self" if device.is_self else ("gateway" if device.is_gateway else None)
+        ip_col = _colorize(f"{device.ip:<16}", kind, color) if kind else f"{device.ip:<16}"
+        mac_col = _colorize(f"{device.mac or '-':<20}", "mac", color)
+        vendor_col = _colorize(f"{device.vendor or '-':<24}", "vendor", color) if args.lookup else ""
+        host_col = _colorize(f"{device.hostname or '-':<28}", "host", color)
+        print(f"{ip_col}{mac_col}{vendor_col}{host_col}{note}")
+    print(f"Found {len(devices)} device(s).")
 
 
 def main(argv: list[str] | None = None) -> int:

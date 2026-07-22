@@ -77,3 +77,7 @@ def renamefiles() -> int:
 
 def samplefiles() -> int:
     return _run("samplefiles")
+
+
+def netscan() -> int:
+    return _run("netscan")
