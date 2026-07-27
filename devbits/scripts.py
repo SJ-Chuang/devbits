@@ -81,3 +81,7 @@ def samplefiles() -> int:
 
 def netscan() -> int:
     return _run("netscan")
+
+
+def wifi() -> int:
+    return _run("wifi")

@@ -28,6 +28,10 @@ _ANSI = {
     "mac": "\033[36m",
     "host": "\033[35m",
     "vendor": "\033[33m",
+    "ssid": "\033[1;36m",
+    "signal": "\033[32m",
+    "lock": "\033[33m",
+    "dim": "\033[2m",
     "reset": "\033[0m",
 }
 
@@ -486,6 +490,97 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Disable colored output (also honors NO_COLOR).")
     p.set_defaults(func=cmd_netscan)
 
+    # ── wifi ───────────────────────────────────────────────────
+    p = sub.add_parser(
+        "wifi",
+        help="Manage Wi-Fi: connect, power on/off, forget a network.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Control the Wi-Fi radio from the terminal on macOS, Windows and\n"
+            "Linux (NetworkManager). Wraps the platform's own tooling:\n"
+            "networksetup, netsh, and nmcli respectively.\n\n"
+            "Examples:\n"
+            "  devbits wifi connect                 # pick from a list, then type the password\n"
+            "  devbits wifi connect MyHome-5G       # skip the picker\n"
+            "  devbits wifi on\n"
+            "  devbits wifi off\n"
+            "  devbits wifi forget OldCafe"
+        ),
+    )
+    wifi_sub = p.add_subparsers(dest="action", required=True)
+
+    w = wifi_sub.add_parser(
+        "connect",
+        help="Scan for networks, pick one with the arrow keys, and join it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "List every Wi-Fi network in range and connect to the one you pick.\n"
+            "Move with ↑/↓, confirm with Enter, cancel with Esc. The password is\n"
+            "read without echoing; open networks skip the prompt, and networks\n"
+            "your system already remembers are joined with the stored password.\n\n"
+            "Pass an SSID to skip the picker (useful in scripts). --password is\n"
+            "accepted for automation, but it lands in your shell history — prefer\n"
+            "the interactive prompt.\n\n"
+            "Examples:\n"
+            "  devbits wifi connect\n"
+            "  devbits wifi connect MyHome-5G\n"
+            "  devbits wifi connect MyHome-5G --password 'secret'"
+        ),
+    )
+    w.add_argument("ssid", nargs="?", default=None,
+                   help="Network to join. Default: choose interactively.")
+    w.add_argument("--password", default=None,
+                   help="Password. Default: prompt (hidden) when one is needed.")
+    w.add_argument("--interface", default=None,
+                   help="Wi-Fi interface / adapter to use. Default: auto-detected.")
+    w.add_argument("--timeout", type=float, default=30.0,
+                   help="Seconds to wait for the connection. Default: 30.0")
+    w.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
+    w.set_defaults(func=cmd_wifi_connect)
+
+    w = wifi_sub.add_parser(
+        "on",
+        help="Turn the Wi-Fi radio on.",
+        description="Power on the Wi-Fi adapter. On Windows this needs an Administrator terminal.",
+    )
+    w.add_argument("--interface", default=None,
+                   help="Wi-Fi interface / adapter to use. Default: auto-detected.")
+    w.set_defaults(func=cmd_wifi_on)
+
+    w = wifi_sub.add_parser(
+        "off",
+        help="Turn the Wi-Fi radio off.",
+        description="Power off the Wi-Fi adapter. On Windows this needs an Administrator terminal.",
+    )
+    w.add_argument("--interface", default=None,
+                   help="Wi-Fi interface / adapter to use. Default: auto-detected.")
+    w.set_defaults(func=cmd_wifi_off)
+
+    w = wifi_sub.add_parser(
+        "forget",
+        help="Forget a saved network so it stops auto-connecting.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Remove a network from the list this machine remembers, so it is no\n"
+            "longer joined automatically. Without an SSID, pick one from the saved\n"
+            "networks with the arrow keys.\n\n"
+            "On macOS this edits the preferred-networks list and may need sudo.\n\n"
+            "Examples:\n"
+            "  devbits wifi forget\n"
+            "  devbits wifi forget OldCafe"
+        ),
+    )
+    w.add_argument("ssid", nargs="?", default=None,
+                   help="Network to forget. Default: choose interactively.")
+    w.add_argument("--interface", default=None,
+                   help="Wi-Fi interface / adapter to use. Default: auto-detected.")
+    w.add_argument("--yes", action="store_true",
+                   help="Skip the confirmation prompt.")
+    w.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
+    w.set_defaults(func=cmd_wifi_forget)
+
     return parser
 
 
@@ -652,11 +747,197 @@ def cmd_netscan(args: argparse.Namespace) -> None:
     print(f"Found {len(devices)} device(s).")
 
 
+# ---------------------------------------------------------------------------
+# wifi
+# ---------------------------------------------------------------------------
+
+def _unicode_ok() -> bool:
+    return "utf" in (getattr(sys.stderr, "encoding", None) or "").lower()
+
+
+def _signal_bar(percent: int | None, cells: int = 4) -> str:
+    """A tiny bar chart for a 0-100 signal quality."""
+    filled_char, empty_char = ("█", "░") if _unicode_ok() else ("#", ".")
+    if percent is None:
+        return empty_char * cells
+    filled = max(0, min(cells, round(percent / (100 / cells))))
+    return filled_char * filled + empty_char * (cells - filled)
+
+
+def _wifi_rows(networks: list, color: bool) -> list[str]:
+    """Render scanned networks as aligned rows for the selection list."""
+    from .tui import pad, visible_len
+
+    # Pad by terminal columns, not characters, so CJK SSIDs still line up.
+    width = min(32, max([visible_len(n.ssid) for n in networks] + [12]))
+    # Remembered networks listed without a scan have neither signal nor
+    # security; drop those columns rather than print a row of placeholders.
+    detailed = any(n.signal is not None or n.security is not None for n in networks)
+    rows = []
+    for net in networks:
+        tags = []
+        if net.in_use:
+            tags.append("connected")
+        elif net.saved:
+            tags.append("saved")
+        if net.is_open:
+            tags.append("open")
+        row = _colorize(pad(net.ssid, width), "ssid", color)
+        if detailed:
+            signal = f"{net.signal:>3}%" if net.signal is not None else "  ?%"
+            row += "  " + _colorize(f"{_signal_bar(net.signal)} {signal}", "signal", color)
+            row += "  " + _colorize(pad(net.security or "-", 16), "lock", color)
+        if tags:
+            row += _colorize(f"  ({', '.join(tags)})", "dim", color)
+        rows.append(row)
+    return rows
+
+
+def cmd_wifi_connect(args: argparse.Namespace) -> None:
+    from getpass import getpass
+
+    from . import wifi
+    from .tui import select
+
+    color = _use_color(False if args.no_color else None)
+    target = None
+    ssid = args.ssid
+
+    if ssid is None:
+        print("Scanning for Wi-Fi networks ...", file=sys.stderr)
+        try:
+            networks = wifi.scan_networks(args.interface)
+        except wifi.ScanBlocked as exc:
+            # macOS can hide every SSID; the remembered networks are still
+            # readable, and joining one of those needs no scan permission.
+            saved = _saved_or_empty(args.interface)
+            if not saved:
+                raise
+            print(f"{exc}\n\nFalling back to your saved networks.", file=sys.stderr)
+            networks = [wifi.Network(ssid=name, saved=True) for name in saved]
+        if not networks:
+            raise wifi.WifiError("No Wi-Fi networks in range.")
+        index = select(
+            _wifi_rows(networks, color),
+            title=_colorize("Select a network to join:", "header", color),
+            footer="↑/↓ move · Enter connect · Esc cancel" if _unicode_ok()
+                   else "up/down move, Enter connect, Esc cancel",
+            color=color,
+        )
+        if index is None:
+            print("Cancelled.", file=sys.stderr)
+            return
+        target = networks[index]
+        ssid = target.ssid
+
+    is_open = target.is_open if target else False
+    known = target.saved if target else ssid in _saved_or_empty(args.interface)
+
+    password = args.password
+    if password is None and not is_open and not known:
+        password = getpass(f"Password for {ssid!r} (blank if open): ") or None
+
+    print(f"Connecting to {ssid!r} ...", file=sys.stderr)
+    try:
+        wifi.connect(ssid, password, args.interface, args.timeout)
+    except wifi.WifiError as exc:
+        # A stored password can be stale or absent — offer to type one instead.
+        if password is not None or is_open or not sys.stdin.isatty():
+            raise
+        # Not a failure yet — just means the OS had no usable stored password.
+        print(f"No stored password could be used ({exc}). Enter it manually:", file=sys.stderr)
+        password = getpass(f"Password for {ssid!r}: ") or None
+        wifi.connect(ssid, password, args.interface, args.timeout)
+
+    active = wifi.current_ssid(args.interface)
+    if active is None or active == ssid:
+        print(f"Connected to {ssid}.")
+    else:
+        print(f"Join requested for {ssid}, but the active network is {active}.")
+
+
+def _saved_or_empty(interface: str | None) -> list[str]:
+    from . import wifi
+
+    try:
+        return wifi.saved_networks(interface)
+    except wifi.WifiError:
+        return []
+
+
+def _wifi_power(args: argparse.Namespace, enabled: bool) -> None:
+    from . import wifi
+
+    wifi.set_radio(enabled, args.interface)
+    state = wifi.radio_enabled(args.interface)
+    word = "on" if enabled else "off"
+    if state is None or state is enabled:
+        print(f"Wi-Fi turned {word}.")
+    else:
+        print(f"Requested Wi-Fi {word}, but the adapter reports it is "
+              f"{'on' if state else 'off'}.")
+
+
+def cmd_wifi_on(args: argparse.Namespace) -> None:
+    _wifi_power(args, True)
+
+
+def cmd_wifi_off(args: argparse.Namespace) -> None:
+    _wifi_power(args, False)
+
+
+def cmd_wifi_forget(args: argparse.Namespace) -> None:
+    from . import wifi
+    from .tui import pad, select, visible_len
+
+    color = _use_color(False if args.no_color else None)
+    ssid = args.ssid
+
+    if ssid is None:
+        saved = wifi.saved_networks(args.interface)
+        if not saved:
+            raise wifi.WifiError("This machine has no saved Wi-Fi networks.")
+        active = wifi.current_ssid(args.interface)
+        width = min(32, max([visible_len(name) for name in saved] + [12]))
+        rows = [
+            _colorize(pad(name, width), "ssid", color)
+            + (_colorize("  (connected)", "dim", color) if name == active else "")
+            for name in saved
+        ]
+        index = select(
+            rows,
+            title=_colorize("Select a network to forget:", "header", color),
+            footer="↑/↓ move · Enter forget · Esc cancel" if _unicode_ok()
+                   else "up/down move, Enter forget, Esc cancel",
+            color=color,
+        )
+        if index is None:
+            print("Cancelled.", file=sys.stderr)
+            return
+        ssid = saved[index]
+
+    if not args.yes and sys.stdin.isatty():
+        try:
+            answer = input(f"Forget {ssid!r} and stop auto-connecting? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Cancelled.", file=sys.stderr)
+            return
+
+    wifi.forget(ssid, args.interface)
+    print(f"Forgot {ssid}. It will no longer connect automatically.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         args.func(args)
+    except KeyboardInterrupt:
+        # Interactive commands (e.g. wifi connect) can be aborted mid-prompt.
+        print("\nAborted.", file=sys.stderr)
+        return 130
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

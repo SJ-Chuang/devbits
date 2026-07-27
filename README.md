@@ -68,6 +68,7 @@ clipvideo --help
 | Command | Description |
 |---------|-------------|
 | `netscan` | List devices connected to your local network (Wi-Fi / router) with their IP, MAC, and hostname. `--lookup` adds the manufacturer. |
+| `wifi` | Manage Wi-Fi: `connect` (arrow-key picker + hidden password prompt), `on`, `off`, `forget`. Works on macOS, Windows and Linux. |
 
 ## Examples
 
@@ -105,12 +106,62 @@ netscan --lookup
 
 # Scan a specific subnet, faster, without hostname lookups
 netscan --network 192.168.1.0/24 --timeout 0.5 --no-resolve
+
+# Pick a Wi-Fi network with the arrow keys, then type the password
+wifi connect
+
+# Join a specific network without the picker
+wifi connect MyHome-5G
+
+# Turn the Wi-Fi radio on / off
+wifi on
+wifi off
+
+# Stop a network from auto-connecting
+wifi forget OldCafe
 ```
 
 > `netscan` reports IP, MAC, hostname and (with `--lookup`) the hardware
 > **manufacturer** — a network scan can't read a device's CPU/RAM/OS. Phones and
 > laptops that use a randomized/private MAC show up as `(private)` and can't be
 > attributed to a vendor.
+
+### Wi-Fi
+
+`wifi connect` lists everything in range — move with ↑/↓, press Enter to join,
+Esc to cancel. The password prompt is hidden, skipped for open networks, and
+skipped again for networks your system already remembers. When stdout isn't a
+terminal the picker degrades to a numbered prompt, so the command still works
+over pipes and in scripts.
+
+Each subcommand drives the platform's own tooling, so no extra dependency or
+driver access is needed:
+
+| OS | Tooling used | Notes |
+|----|--------------|-------|
+| macOS | `networksetup`, `system_profiler` | `wifi forget` edits the preferred-networks list and may need `sudo`. See the Location Services note below. |
+| Linux | `nmcli` (NetworkManager) | The Ubuntu default. Systems without NetworkManager aren't supported. |
+| Windows | `netsh` | `wifi on` / `wifi off` enable and disable the adapter, which needs an Administrator terminal. |
+
+> `--password` exists for automation but lands in your shell history — prefer the
+> interactive prompt. On Linux, NetworkManager itself takes the passphrase as a
+> command-line argument, so it is briefly visible in the process list.
+
+#### macOS: Location Services and scanning
+
+Since macOS 15, a process without Location Services authorization gets every
+SSID replaced by the literal string `<redacted>` — the scan still returns the
+right number of access points, just no names. `wifi connect` detects this and
+falls back to letting you pick from your **saved** networks, which are readable
+without the permission. Joining by name (`wifi connect MyHome-5G`) is never
+gated either.
+
+To get the full list of nearby networks, grant Location Services to the terminal
+app you run `wifi` from (System Settings → Privacy & Security → Location
+Services), and enable Wi-Fi Networking under *System Services → Details*.
+
+Signal strength has the same limitation: macOS reports it only for the network
+you're currently connected to, so other entries show `?%`.
 
 ## Output Defaults
 
