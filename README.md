@@ -68,7 +68,7 @@ clipvideo --help
 | Command | Description |
 |---------|-------------|
 | `netscan` | List devices connected to your local network (Wi-Fi / router) with their IP, MAC, and hostname. `--lookup` adds the manufacturer. |
-| `wifi` | Manage Wi-Fi: `connect` (arrow-key picker + hidden password prompt), `on`, `off`, `forget`. Works on macOS, Windows and Linux. |
+| `wifi` | Manage Wi-Fi: `list`, `connect` (arrow-key picker + hidden password prompt), `on`, `off`, `forget`. Linux and Windows fully; macOS without `list`. |
 
 ## Examples
 
@@ -107,6 +107,9 @@ netscan --lookup
 # Scan a specific subnet, faster, without hostname lookups
 netscan --network 192.168.1.0/24 --timeout 0.5 --no-resolve
 
+# Show the Wi-Fi networks in range (Linux / Windows)
+wifi list
+
 # Pick a Wi-Fi network with the arrow keys, then type the password
 wifi connect
 
@@ -139,29 +142,66 @@ driver access is needed:
 
 | OS | Tooling used | Notes |
 |----|--------------|-------|
-| macOS | `networksetup`, `system_profiler` | `wifi forget` edits the preferred-networks list and may need `sudo`. See the Location Services note below. |
-| Linux | `nmcli` (NetworkManager) | The Ubuntu default. Systems without NetworkManager aren't supported. |
+| Linux | `nmcli` (NetworkManager) | The Ubuntu default. Systems without NetworkManager aren't supported. See the sudo note below. |
 | Windows | `netsh` | `wifi on` / `wifi off` enable and disable the adapter, which needs an Administrator terminal. |
+| macOS | `networksetup` | **No scanning** — see below. `connect`, `on`, `off` and `forget` all work; `wifi forget` edits the preferred-networks list and may need `sudo`. |
+
+### Scanning support
+
+| | `list` | `connect <ssid>` | `connect` (picker) | `on` / `off` | `forget` |
+|---|---|---|---|---|---|
+| Linux | ✅ | ✅ | networks in range | ✅ | ✅ |
+| Windows | ✅ | ✅ | networks in range | ✅ | ✅ |
+| macOS | ❌ | ✅ | saved networks | ✅ | ✅ |
 
 > `--password` exists for automation but lands in your shell history — prefer the
 > interactive prompt. On Linux, NetworkManager itself takes the passphrase as a
 > command-line argument, so it is briefly visible in the process list.
 
-#### macOS: Location Services and scanning
+#### Linux: polkit and sudo
 
-Since macOS 15, a process without Location Services authorization gets every
-SSID replaced by the literal string `<redacted>` — the scan still returns the
-right number of access points, just no names. `wifi connect` detects this and
-falls back to letting you pick from your **saved** networks, which are readable
-without the permission. Joining by name (`wifi connect MyHome-5G`) is never
-gated either.
+NetworkManager's polkit rules usually let a local desktop session toggle Wi-Fi
+without a password, but deny the same thing over SSH. When an operation is
+refused, `wifi` says so and re-runs **just that `nmcli` command** under `sudo`,
+which prompts for your password on the terminal:
 
-To get the full list of nearby networks, grant Location Services to the terminal
-app you run `wifi` from (System Settings → Privacy & Security → Location
-Services), and enable Wi-Fi Networking under *System Services → Details*.
+```
+Error: Failed to set radio: Not authorized to enable/disable WiFi.
+Retrying with sudo (you may be asked for your password) ...
+```
 
-Signal strength has the same limitation: macOS reports it only for the network
-you're currently connected to, so other entries show `?%`.
+The escalation only happens on an interactive terminal. In a script or pipeline
+the command fails with the permission error instead of hanging on a prompt.
+
+> If you have a shell function or alias named `wifi` (a common `nmcli` wrapper),
+> it takes precedence over this command — shell functions win over `PATH`. Use
+> `devbits wifi ...`, or remove the function.
+
+#### macOS: no scanning
+
+`wifi list` is unsupported on macOS, and `wifi connect` without an SSID picks
+from the networks this Mac already **remembers** rather than what's in range:
+
+```
+$ devbits wifi connect
+Listing nearby Wi-Fi networks is not supported on macOS. ...
+
+Falling back to your saved networks.
+Select a network to join:
+❯ MyHome-5G                     (saved)
+  CoffeeShop                    (saved)
+```
+
+Joining by name — `wifi connect MyHome-5G` — always works, as do `on`, `off`
+and `forget`.
+
+The reason is that the last remaining macOS API that enumerates networks,
+`system_profiler SPAirPortDataType`, replaces every SSID with the literal string
+`<redacted>` unless the calling process holds Location Services authorization.
+That is a TCC privacy permission, not a file permission: `sudo` does not bypass
+it, the authorization database is SIP-protected, and a CLI cannot request it —
+only a bundled app linking CoreLocation can. Rather than ship a pyobjc
+dependency for one platform, devbits doesn't scan on macOS at all.
 
 ## Output Defaults
 

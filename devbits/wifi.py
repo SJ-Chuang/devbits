@@ -3,9 +3,13 @@
 Each operation shells out to the OS tool that owns Wi-Fi state, so no
 third-party dependency or driver access is needed:
 
-* macOS  — ``networksetup`` (+ ``system_profiler`` / ``airport`` for scans)
+* macOS  — ``networksetup``
 * Linux  — ``nmcli`` (NetworkManager, the Ubuntu default)
 * Windows — ``netsh wlan`` / ``netsh interface``
+
+Scanning for nearby networks is supported on Linux and Windows only; macOS has
+no usable API for it (see :data:`_MACOS_NO_SCAN`). Everything else — connecting,
+radio power, forgetting — works on all three.
 
 Anything that can't be done on the current system raises :class:`WifiError`
 with a message explaining what is missing (a tool, a permission, elevation).
@@ -14,7 +18,6 @@ with a message explaining what is missing (a tool, a permission, elevation).
 from __future__ import annotations
 
 import platform
-import plistlib
 import re
 import subprocess
 import tempfile
@@ -25,31 +28,30 @@ from xml.sax.saxutils import escape as xml_escape
 
 __all__ = [
     "Network",
+    "PermissionRequired",
     "ScanBlocked",
     "WifiError",
     "connect",
     "current_ssid",
     "forget",
     "radio_enabled",
+    "retry_with_sudo",
     "saved_networks",
     "scan_networks",
+    "set_radio",
+    "supports_scanning",
 ]
 
-#: Path to the legacy macOS ``airport`` tool (removed in macOS 15+).
-AIRPORT_BIN = (
-    "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-)
-
-#: macOS 15+ substitutes this for every SSID when the calling process has no
-#: Location Services authorization — the scan succeeds but the names are gone.
-REDACTED_SSID = "<redacted>"
-
-_LOCATION_HINT = (
-    "macOS withheld the network names (every SSID came back as '<redacted>'). "
-    "Scanning needs Location Services: System Settings → Privacy & Security → "
-    "Location Services → enable it for your terminal app, and under System Services "
-    "→ Details enable Wi-Fi Networking. Joining a network by name still works: "
-    "devbits wifi connect <ssid>"
+#: Why macOS gets no scanning. Since macOS 15 the only remaining API that
+#: enumerates networks (``system_profiler SPAirPortDataType``) replaces every
+#: SSID with "<redacted>" unless the calling process holds Location Services
+#: authorization — a TCC privacy permission that sudo cannot grant and that no
+#: CLI can request. Supporting it would mean shipping a CoreLocation
+#: dependency, so devbits doesn't scan on macOS at all.
+_MACOS_NO_SCAN = (
+    "Listing nearby Wi-Fi networks is not supported on macOS. Join by name with "
+    "'devbits wifi connect <ssid>', or run 'devbits wifi connect' to pick from the "
+    "networks this Mac already remembers."
 )
 
 
@@ -58,15 +60,49 @@ class WifiError(RuntimeError):
 
 
 class ScanBlocked(WifiError):
-    """The OS hid the network names, so a scan can't identify anything.
+    """This platform can't enumerate the networks in range.
 
-    Raised on macOS when Location Services is not granted. Callers that can
-    work from remembered networks instead should catch this specifically.
+    Callers that can work from the remembered networks instead should catch
+    this specifically rather than treating it as a hard failure.
     """
 
 
-def _is_redacted(ssid: str) -> bool:
-    return ssid.strip() == REDACTED_SSID
+class PermissionRequired(WifiError):
+    """The operation was refused for lack of privileges.
+
+    Carries the exact command that was refused so an interactive caller can
+    re-run just that step under ``sudo`` — see :func:`retry_with_sudo`. This
+    is common on Linux: NetworkManager's polkit rules usually allow a local
+    desktop session to toggle Wi-Fi, but deny it over SSH.
+    """
+
+    def __init__(self, message: str, command: list[str]) -> None:
+        super().__init__(message)
+        self.command = command
+
+
+#: Messages the OS tools use when polkit / permissions block an operation.
+_PERMISSION_RE = re.compile(
+    r"not authorized|permission denied|access denied|insufficient privileges|"
+    r"authentication (?:is )?required|not authenticated|must be root",
+    re.I,
+)
+
+
+def retry_with_sudo(command: list[str], timeout: float = 180.0) -> None:
+    """Re-run ``command`` under ``sudo``, letting it prompt on the terminal.
+
+    Deliberately does not capture output: sudo needs the real terminal to ask
+    for a password. Only call this from an interactive context.
+    """
+    try:
+        proc = subprocess.run(["sudo", *command], timeout=timeout)
+    except FileNotFoundError as exc:
+        raise WifiError("sudo is not available on this system") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WifiError(f"Timed out running: sudo {' '.join(command)}") from exc
+    if proc.returncode != 0:
+        raise WifiError(f"Failed even with sudo: {' '.join(command)}")
 
 
 @dataclass
@@ -169,7 +205,7 @@ def _titleize_security(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# macOS backend (networksetup / system_profiler / airport)
+# macOS backend (networksetup) — no scanning, see _MACOS_NO_SCAN
 # ---------------------------------------------------------------------------
 
 _mac_iface_cache: dict[str, str] = {}
@@ -190,82 +226,6 @@ def _mac_interface(interface: str | None = None) -> str:
                 _mac_iface_cache["device"] = match.group(1)
                 return match.group(1)
     raise WifiError("No Wi-Fi interface found (see: networksetup -listallhardwareports)")
-
-
-def _mac_scan_airport() -> list[Network]:
-    """Parse ``airport -s``. Only present on macOS 14 and older."""
-    if not Path(AIRPORT_BIN).exists():
-        return []
-    proc = _run([AIRPORT_BIN, "-s"], timeout=30)
-    networks: list[Network] = []
-    for line in proc.stdout.splitlines()[1:]:  # skip the column header
-        # "  SSID name  aa:bb:cc:dd:ee:ff -52  6       Y  TW WPA2(PSK/AES/AES)"
-        match = re.match(
-            r"\s*(.+?)\s+(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\s+(-?\d+)\s+\S+\s+(.*)$", line
-        )
-        if not match:
-            continue
-        ssid, rssi, rest = match.group(1), int(match.group(2)), match.group(3)
-        security = rest.split()[-1] if rest.split() else ""
-        networks.append(
-            Network(ssid=ssid, signal=_rssi_to_percent(rssi), security=_titleize_security(security))
-        )
-    return networks
-
-
-def _mac_airport_entry(entry: dict, in_use: bool = False) -> Network:
-    noise = entry.get("spairport_signal_noise") or ""
-    match = re.search(r"(-?\d+)\s*dBm", noise)
-    signal = _rssi_to_percent(int(match.group(1))) if match else None
-    security = (entry.get("spairport_security_mode") or "").replace("spairport_security_mode_", "")
-    return Network(
-        ssid=entry.get("_name") or "",
-        signal=signal,
-        security=_titleize_security(security),
-        in_use=in_use,
-    )
-
-
-def _mac_scan_profiler() -> list[Network]:
-    """Parse ``system_profiler -xml SPAirPortDataType`` (works on all macOS)."""
-    proc = _run(["system_profiler", "-xml", "SPAirPortDataType"], timeout=90, text=False)
-    if proc.returncode != 0 or not proc.stdout:
-        raise _fail(proc, "system_profiler could not read Wi-Fi information")
-    try:
-        data = plistlib.loads(proc.stdout)
-    except Exception as exc:  # malformed plist — nothing sensible to salvage
-        raise WifiError(f"Could not parse system_profiler output: {exc}") from exc
-
-    networks: list[Network] = []
-    for section in data if isinstance(data, list) else []:
-        for item in section.get("_items", []):
-            for iface in item.get("spairport_airport_interfaces", []):
-                current = iface.get("spairport_current_network_information")
-                if isinstance(current, dict) and current.get("_name"):
-                    networks.append(_mac_airport_entry(current, in_use=True))
-                for other in iface.get("spairport_airport_other_local_wireless_networks", []) or []:
-                    networks.append(_mac_airport_entry(other))
-    return networks
-
-
-def _mac_scan(interface: str | None) -> list[Network]:
-    networks = _mac_scan_airport()
-    if not networks:
-        networks = _mac_scan_profiler()
-    if networks and all(_is_redacted(net.ssid) for net in networks):
-        raise ScanBlocked(_LOCATION_HINT)
-    # A partial redaction still leaves usable entries; drop the nameless ones.
-    networks = [net for net in networks if not _is_redacted(net.ssid)]
-    if not networks:
-        raise ScanBlocked(_LOCATION_HINT)
-    return networks
-
-
-def _mac_current_ssid(interface: str | None) -> str | None:
-    for net in _mac_scan_profiler():
-        if net.in_use:
-            return None if _is_redacted(net.ssid) else net.ssid
-    return None
 
 
 def _mac_saved(interface: str | None) -> list[str]:
@@ -393,6 +353,15 @@ def _nm_saved(interface: str | None) -> list[str]:
     return names
 
 
+def _nm_check(proc: subprocess.CompletedProcess, cmd: list[str], fallback: str) -> None:
+    """Raise for a failed nmcli call, flagging polkit refusals separately."""
+    if proc.returncode == 0:
+        return
+    if _PERMISSION_RE.search(f"{proc.stdout}\n{proc.stderr}"):
+        raise PermissionRequired(str(_fail(proc, fallback)), cmd)
+    raise _fail(proc, fallback)
+
+
 def _nm_connect(ssid: str, password: str | None, interface: str | None, timeout: float) -> None:
     cmd = ["nmcli", "-w", str(max(1, int(timeout))), "device", "wifi", "connect", ssid]
     if password:
@@ -401,9 +370,7 @@ def _nm_connect(ssid: str, password: str | None, interface: str | None, timeout:
         cmd += ["password", password]
     if interface:
         cmd += ["ifname", interface]
-    proc = _run(cmd, timeout=timeout + 15)
-    if proc.returncode != 0:
-        raise _fail(proc, f"Could not join {ssid!r}")
+    _nm_check(_run(cmd, timeout=timeout + 15), cmd, f"Could not join {ssid!r}")
 
 
 def _nm_forget(ssid: str, interface: str | None) -> None:
@@ -416,15 +383,13 @@ def _nm_forget(ssid: str, interface: str | None) -> None:
     if not uuids:
         raise WifiError(f"No saved Wi-Fi network named {ssid!r}")
     for uuid in uuids:  # the same SSID can have several stored profiles
-        result = _run(["nmcli", "connection", "delete", "uuid", uuid], timeout=20)
-        if result.returncode != 0:
-            raise _fail(result, f"Could not forget {ssid!r}")
+        cmd = ["nmcli", "connection", "delete", "uuid", uuid]
+        _nm_check(_run(cmd, timeout=20), cmd, f"Could not forget {ssid!r}")
 
 
 def _nm_set_radio(enabled: bool, interface: str | None) -> None:
-    proc = _run(["nmcli", "radio", "wifi", "on" if enabled else "off"], timeout=20)
-    if proc.returncode != 0:
-        raise _fail(proc, f"Could not turn Wi-Fi {'on' if enabled else 'off'}")
+    cmd = ["nmcli", "radio", "wifi", "on" if enabled else "off"]
+    _nm_check(_run(cmd, timeout=20), cmd, f"Could not turn Wi-Fi {'on' if enabled else 'off'}")
 
 
 def _nm_radio_enabled(interface: str | None) -> bool | None:
@@ -624,23 +589,27 @@ def _unsupported(action: str) -> WifiError:
     )
 
 
+def supports_scanning() -> bool:
+    """Whether this platform can enumerate the networks in range.
+
+    Lets callers skip a "Scanning ..." notice they would immediately have to
+    retract; :func:`scan_networks` raises :class:`ScanBlocked` either way.
+    """
+    return _system() in ("linux", "windows")
+
+
 def scan_networks(interface: str | None = None, rescan: bool = True) -> list[Network]:
     """Visible Wi-Fi networks, strongest first, duplicate SSIDs merged.
 
     ``rescan`` asks the driver for a fresh scan where the platform supports it
-    (Linux); macOS and Windows always report their latest scan results.
+    (Linux); Windows always reports its latest scan results. Raises
+    :class:`ScanBlocked` on macOS, which has no usable scanning API — see
+    :data:`_MACOS_NO_SCAN`.
     """
     system = _system()
     if system == "darwin":
-        networks = _mac_scan(interface)
-        saved = set()
-        try:
-            saved = set(_mac_saved(interface))
-        except WifiError:
-            pass  # listing preferred networks is a nicety, not required to connect
-        for net in networks:
-            net.saved = net.ssid in saved
-    elif system == "windows":
+        raise ScanBlocked(_MACOS_NO_SCAN)
+    if system == "windows":
         networks = _win_scan(interface, rescan)
     elif system == "linux":
         networks = _nm_scan(interface, rescan)
@@ -652,9 +621,9 @@ def scan_networks(interface: str | None = None, rescan: bool = True) -> list[Net
 def current_ssid(interface: str | None = None) -> str | None:
     """SSID of the currently connected network, or ``None``."""
     system = _system()
+    if system == "darwin":
+        return None  # the only API that reports it is the gated scan
     try:
-        if system == "darwin":
-            return _mac_current_ssid(interface)
         if system == "windows":
             return _win_current_ssid(interface)
         if system == "linux":
@@ -687,6 +656,10 @@ def connect(
     Pass ``password=None`` for open networks or ones whose credentials are
     already stored by the OS.
     """
+    if not ssid or not ssid.strip():
+        # Guard here rather than let the OS tool report it: nmcli answers with
+        # "SSID or BSSID are missing", which reads like a devbits bug.
+        raise WifiError("No network name given. Usage: devbits wifi connect <ssid>")
     system = _system()
     if system == "darwin":
         _mac_connect(ssid, password, interface, timeout)

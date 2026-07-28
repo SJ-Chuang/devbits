@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -499,7 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Control the Wi-Fi radio from the terminal on macOS, Windows and\n"
             "Linux (NetworkManager). Wraps the platform's own tooling:\n"
             "networksetup, netsh, and nmcli respectively.\n\n"
+            "On Linux, operations NetworkManager refuses (common over SSH, where\n"
+            "polkit denies what a desktop session is allowed) are retried under\n"
+            "sudo after asking you.\n\n"
             "Examples:\n"
+            "  devbits wifi list\n"
             "  devbits wifi connect                 # pick from a list, then type the password\n"
             "  devbits wifi connect MyHome-5G       # skip the picker\n"
             "  devbits wifi on\n"
@@ -538,6 +543,25 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--no-color", action="store_true",
                    help="Disable colored output (also honors NO_COLOR).")
     w.set_defaults(func=cmd_wifi_connect)
+
+    w = wifi_sub.add_parser(
+        "list",
+        help="List the Wi-Fi networks in range.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Show every Wi-Fi network in range with its signal strength and\n"
+            "security, strongest first. Networks broadcasting on several bands\n"
+            "or access points are merged into one entry.\n\n"
+            "Examples:\n"
+            "  devbits wifi list\n"
+            "  devbits wifi list --no-color"
+        ),
+    )
+    w.add_argument("--interface", default=None,
+                   help="Wi-Fi interface / adapter to use. Default: auto-detected.")
+    w.add_argument("--no-color", action="store_true",
+                   help="Disable colored output (also honors NO_COLOR).")
+    w.set_defaults(func=cmd_wifi_list)
 
     w = wifi_sub.add_parser(
         "on",
@@ -764,12 +788,38 @@ def _signal_bar(percent: int | None, cells: int = 4) -> str:
     return filled_char * filled + empty_char * (cells - filled)
 
 
-def _wifi_rows(networks: list, color: bool) -> list[str]:
-    """Render scanned networks as aligned rows for the selection list."""
-    from .tui import pad, visible_len
+def _wifi_ssid_width(networks: list) -> int:
+    """Column width for the SSID field, measured in terminal cells."""
+    from .tui import visible_len
 
     # Pad by terminal columns, not characters, so CJK SSIDs still line up.
-    width = min(32, max([visible_len(n.ssid) for n in networks] + [12]))
+    return min(32, max([visible_len(n.ssid) for n in networks] + [12]))
+
+
+def _run_privileged(action, *args) -> None:
+    """Run a Wi-Fi operation, offering a sudo retry if the OS refuses it.
+
+    NetworkManager's polkit rules typically allow a local desktop session to
+    change Wi-Fi state but deny it over SSH; re-running just the refused
+    command under sudo is what a user would do by hand.
+    """
+    from . import wifi
+
+    try:
+        action(*args)
+    except wifi.PermissionRequired as exc:
+        if not (sys.stdin.isatty() and shutil.which("sudo")):
+            raise
+        print(f"{exc}\nRetrying with sudo (you may be asked for your password) ...",
+              file=sys.stderr)
+        wifi.retry_with_sudo(exc.command)
+
+
+def _wifi_rows(networks: list, color: bool) -> list[str]:
+    """Render scanned networks as aligned rows for the selection list."""
+    from .tui import pad
+
+    width = _wifi_ssid_width(networks)
     # Remembered networks listed without a scan have neither signal nor
     # security; drop those columns rather than print a row of placeholders.
     detailed = any(n.signal is not None or n.security is not None for n in networks)
@@ -804,12 +854,13 @@ def cmd_wifi_connect(args: argparse.Namespace) -> None:
     ssid = args.ssid
 
     if ssid is None:
-        print("Scanning for Wi-Fi networks ...", file=sys.stderr)
+        if wifi.supports_scanning():
+            print("Scanning for Wi-Fi networks ...", file=sys.stderr)
         try:
             networks = wifi.scan_networks(args.interface)
         except wifi.ScanBlocked as exc:
-            # macOS can hide every SSID; the remembered networks are still
-            # readable, and joining one of those needs no scan permission.
+            # No scanning on this platform (macOS). The remembered networks are
+            # still readable, and joining one of those needs no scan at all.
             saved = _saved_or_empty(args.interface)
             if not saved:
                 raise
@@ -838,8 +889,14 @@ def cmd_wifi_connect(args: argparse.Namespace) -> None:
         password = getpass(f"Password for {ssid!r} (blank if open): ") or None
 
     print(f"Connecting to {ssid!r} ...", file=sys.stderr)
+
+    def attempt(secret: str | None) -> None:
+        _run_privileged(wifi.connect, ssid, secret, args.interface, args.timeout)
+
     try:
-        wifi.connect(ssid, password, args.interface, args.timeout)
+        attempt(password)
+    except wifi.PermissionRequired:
+        raise  # a privilege problem, not a wrong password — don't prompt
     except wifi.WifiError as exc:
         # A stored password can be stale or absent — offer to type one instead.
         if password is not None or is_open or not sys.stdin.isatty():
@@ -847,7 +904,7 @@ def cmd_wifi_connect(args: argparse.Namespace) -> None:
         # Not a failure yet — just means the OS had no usable stored password.
         print(f"No stored password could be used ({exc}). Enter it manually:", file=sys.stderr)
         password = getpass(f"Password for {ssid!r}: ") or None
-        wifi.connect(ssid, password, args.interface, args.timeout)
+        attempt(password)
 
     active = wifi.current_ssid(args.interface)
     if active is None or active == ssid:
@@ -865,10 +922,31 @@ def _saved_or_empty(interface: str | None) -> list[str]:
         return []
 
 
+def cmd_wifi_list(args: argparse.Namespace) -> None:
+    from . import wifi
+    from .tui import pad
+
+    color = _use_color(False if args.no_color else None)
+    if wifi.supports_scanning():
+        print("Scanning for Wi-Fi networks ...", file=sys.stderr)
+    # Listing *is* the scan, so an unsupported platform is simply an error here.
+    networks = wifi.scan_networks(args.interface)
+    if not networks:
+        print("No Wi-Fi networks in range.")
+        return
+    header = (
+        pad("SSID", _wifi_ssid_width(networks)) + "  " + pad("SIGNAL", 9) + "  SECURITY"
+    )
+    print(_colorize(header, "header", color))
+    for row in _wifi_rows(networks, color):
+        print(row)
+    print(f"Found {len(networks)} network(s).")
+
+
 def _wifi_power(args: argparse.Namespace, enabled: bool) -> None:
     from . import wifi
 
-    wifi.set_radio(enabled, args.interface)
+    _run_privileged(wifi.set_radio, enabled, args.interface)
     state = wifi.radio_enabled(args.interface)
     word = "on" if enabled else "off"
     if state is None or state is enabled:
@@ -925,7 +1003,7 @@ def cmd_wifi_forget(args: argparse.Namespace) -> None:
             print("Cancelled.", file=sys.stderr)
             return
 
-    wifi.forget(ssid, args.interface)
+    _run_privileged(wifi.forget, ssid, args.interface)
     print(f"Forgot {ssid}. It will no longer connect automatically.")
 
 
